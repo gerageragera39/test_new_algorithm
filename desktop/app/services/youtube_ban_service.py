@@ -29,6 +29,7 @@ from __future__ import annotations
 import csv
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_CSV_PATH = Path("data/banned_users.csv")
 _CSV_HEADERS = [
     "banned_at",
     "video_id",
@@ -62,7 +64,6 @@ class YouTubeBanService:
     def __init__(self, settings: Settings, db: Session) -> None:
         self.settings = settings
         self.db = db
-        self._csv_path = settings.data_dir / "banned_users.csv"
         self._has_oauth = bool(
             settings.youtube_oauth_client_id
             and settings.youtube_oauth_client_secret
@@ -101,6 +102,7 @@ class YouTubeBanService:
         # Check if already banned channel-wide (prefer channel_id, fallback to
         # username only when neither side has a stable channel identifier).
         existing_query = select(BannedUser)
+        existing_query = existing_query.where(BannedUser.unbanned_at.is_(None))
         if author_channel_id:
             existing_query = existing_query.where(BannedUser.author_channel_id == author_channel_id)
         else:
@@ -186,6 +188,80 @@ class YouTubeBanService:
             "youtube_banned": youtube_banned,
             "youtube_error": youtube_error,
             "csv_saved": not youtube_banned,
+        }
+
+    def unban_user(
+        self,
+        *,
+        banned_user_id: int,
+        unban_reason: str | None = None,
+        unbanned_by_admin: bool = True,
+    ) -> dict[str, Any]:
+        """Lift a previously recorded ban.
+
+        Best-effort behavior:
+        - locally mark the ban as inactive so the user is no longer blocked by
+          our moderation workflows;
+        - if OAuth is configured and the source comment is known, attempt to
+          republish that comment via YouTube API.
+
+        Note: YouTube's API documents comment republishing, but does not expose
+        a separate explicit "unban author" endpoint. Therefore the API step is
+        treated as best effort.
+        """
+        banned_user = self.db.get(BannedUser, banned_user_id)
+        if banned_user is None:
+            return {
+                "status": "not_found",
+                "banned_user_id": None,
+                "youtube_unbanned": False,
+                "youtube_error": "Ban record not found",
+            }
+        if banned_user.unbanned_at is not None:
+            return {
+                "status": "already_unbanned",
+                "banned_user_id": banned_user.id,
+                "youtube_unbanned": bool(banned_user.youtube_unbanned),
+                "youtube_error": banned_user.youtube_unban_error,
+            }
+
+        youtube_unbanned = False
+        youtube_error: str | None = None
+        comment = self.db.get(Comment, banned_user.comment_id) if banned_user.comment_id else None
+        youtube_comment_id = comment.youtube_comment_id if comment else None
+
+        if banned_user.youtube_banned and self._has_oauth and youtube_comment_id:
+            video = self.db.get(Video, banned_user.video_id)
+            youtube_video_id = video.youtube_video_id if video else None
+            youtube_unbanned, youtube_error = self._publish_comment_via_youtube_api(
+                youtube_comment_id,
+                youtube_video_id=youtube_video_id,
+            )
+        elif banned_user.youtube_banned and not self._has_oauth:
+            youtube_error = "YouTube OAuth not configured for unban"
+        elif banned_user.youtube_banned and not youtube_comment_id:
+            youtube_error = "Source comment ID not found for unban"
+
+        banned_user.unbanned_at = utcnow()
+        banned_user.youtube_unbanned = youtube_unbanned
+        banned_user.youtube_unban_error = youtube_error
+        banned_user.unbanned_by_admin = unbanned_by_admin
+        banned_user.unban_reason = unban_reason
+        self.db.add(banned_user)
+        self.db.commit()
+
+        logger.info(
+            "Unbanned user %s (channel=%s, banned_user_id=%d, youtube_unbanned=%s)",
+            banned_user.username,
+            banned_user.author_channel_id or "unknown",
+            banned_user.id,
+            youtube_unbanned,
+        )
+        return {
+            "status": "unbanned",
+            "banned_user_id": banned_user.id,
+            "youtube_unbanned": youtube_unbanned,
+            "youtube_error": youtube_error,
         }
 
     def _get_access_token(self) -> str | None:
@@ -346,6 +422,148 @@ class YouTubeBanService:
         # Should not reach here
         return False, "Max retries exceeded"
 
+    def _publish_comment_via_youtube_api(
+        self,
+        comment_id: str,
+        *,
+        youtube_video_id: str | None = None,
+        max_retries: int = 2,
+    ) -> tuple[bool, str | None]:
+        """Republish a moderated comment via YouTube Data API."""
+        for attempt in range(max_retries):
+            access_token = self._get_access_token()
+            if not access_token:
+                return False, "Failed to get OAuth access token"
+
+            if youtube_video_id:
+                ownership_error = self._validate_channel_ownership(
+                    access_token=access_token,
+                    youtube_video_id=youtube_video_id,
+                )
+                if ownership_error:
+                    return False, ownership_error
+
+            url = "https://www.googleapis.com/youtube/v3/comments/setModerationStatus"
+            params = {
+                "id": comment_id,
+                "moderationStatus": "published",
+            }
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            }
+
+            try:
+                response = requests.post(
+                    f"{url}?{urlencode(params)}",
+                    headers=headers,
+                    timeout=10,
+                )
+                if response.status_code == 204:
+                    logger.info(
+                        "Successfully republished comment via YouTube API: comment_id=%s (attempt %d/%d)",
+                        comment_id,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    return True, None
+                if response.status_code == 401:
+                    self._access_token = None
+                    if attempt < max_retries - 1:
+                        continue
+                    return False, "OAuth token invalid or expired after retries"
+                try:
+                    error_data = response.json() if response.content else {}
+                    error_root = error_data.get("error", {})
+                    error_msg = error_root.get("message", response.text[:200])
+                    if isinstance(error_root.get("errors"), list) and error_root["errors"]:
+                        reason = str(error_root["errors"][0].get("reason", "") or "")
+                        if reason:
+                            error_msg = f"{error_msg} (reason={reason})"
+                except Exception:
+                    error_msg = response.text[:200]
+                return False, f"API error {response.status_code}: {error_msg}"
+            except requests.exceptions.Timeout:
+                return False, "API request timeout"
+            except requests.exceptions.RequestException as exc:
+                return False, f"API request failed: {exc}"
+            except Exception as exc:
+                return False, f"Unexpected error: {exc}"
+
+        return False, "Max retries exceeded"
+
+    def _restore_comment_via_youtube_api(
+        self,
+        comment_id: str,
+        *,
+        youtube_video_id: str | None = None,
+        max_retries: int = 2,
+    ) -> tuple[bool, str | None]:
+        """Best-effort restore of a previously hidden comment on YouTube."""
+        for attempt in range(max_retries):
+            access_token = self._get_access_token()
+            if not access_token:
+                return False, "Failed to get OAuth access token"
+
+            if youtube_video_id:
+                ownership_error = self._validate_channel_ownership(
+                    access_token=access_token,
+                    youtube_video_id=youtube_video_id,
+                )
+                if ownership_error:
+                    return False, ownership_error
+
+            url = "https://www.googleapis.com/youtube/v3/comments/setModerationStatus"
+            params = {
+                "id": comment_id,
+                "moderationStatus": "published",
+            }
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            }
+
+            try:
+                response = requests.post(
+                    f"{url}?{urlencode(params)}",
+                    headers=headers,
+                    timeout=10,
+                )
+                if response.status_code == 204:
+                    logger.info(
+                        "Successfully restored YouTube comment visibility: comment_id=%s (attempt %d/%d)",
+                        comment_id,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    return True, None
+                if response.status_code == 401:
+                    self._access_token = None
+                    if attempt < max_retries - 1:
+                        continue
+                    return False, "OAuth token invalid or expired after retries"
+                if response.status_code == 403:
+                    error_data = response.json() if response.content else {}
+                    error_msg = error_data.get("error", {}).get("message", "Forbidden")
+                    return False, f"API forbidden: {error_msg}"
+                if response.status_code == 404:
+                    return False, "Comment not found on YouTube"
+                try:
+                    error_data = response.json() if response.content else {}
+                    error_root = error_data.get("error", {})
+                    error_msg = error_root.get("message", response.text[:200])
+                except Exception:
+                    error_msg = response.text[:200]
+                return False, f"API error {response.status_code}: {error_msg}"
+            except requests.exceptions.Timeout:
+                return False, "API request timeout"
+            except requests.exceptions.RequestException as exc:
+                return False, f"API request failed: {exc}"
+            except Exception as exc:
+                return False, f"Unexpected error: {exc}"
+
+        return False, "Max retries exceeded"
+
     def _validate_channel_ownership(
         self,
         *,
@@ -474,12 +692,12 @@ class YouTubeBanService:
         insult_target: str | None,
     ) -> None:
         """Save ban record to CSV file."""
-        self._csv_path.parent.mkdir(parents=True, exist_ok=True)
+        _CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
 
         # Check if file exists to write header
-        file_exists = self._csv_path.exists()
+        file_exists = _CSV_PATH.exists()
 
-        with self._csv_path.open("a", newline="", encoding="utf-8") as f:
+        with open(_CSV_PATH, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             if not file_exists:
                 writer.writerow(_CSV_HEADERS)
@@ -504,6 +722,7 @@ class YouTubeBanService:
         When ``video_id`` is omitted, returns the full channel-wide audit list.
         """
         query = select(BannedUser)
+        query = query.where(BannedUser.unbanned_at.is_(None))
         if video_id is not None:
             query = query.where(BannedUser.video_id == video_id)
         query = query.order_by(BannedUser.banned_at.desc())
@@ -517,6 +736,7 @@ class YouTubeBanService:
     ) -> bool:
         """Check if a user is already banned channel-wide."""
         query = select(BannedUser.id)
+        query = query.where(BannedUser.unbanned_at.is_(None))
         if author_channel_id:
             query = query.where(BannedUser.author_channel_id == author_channel_id)
         else:

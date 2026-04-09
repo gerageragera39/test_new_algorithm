@@ -73,26 +73,25 @@
 
 ### 2.1 🔴 Повышение безопасности auto-ban
 
-**КРИТИЧНО**: Это улучшение предотвращает ошибочные баны невинных пользователей.
+**КРИТИЧНО**: теперь комментарии с toxic confidence `>= 0.80` попадают в auto-ban pipeline,
+но перед реальным баном проходят **финальный strict verification pass**.
 
-**Проблема**: 
-- auto_ban_threshold = 0.85 означает ~15% вероятность ошибки
-- При 100 auto-ban комментариях ~ 15 невинных пользователей забанены
-
-**Решение**:
-1. Повышен `auto_ban_threshold` с 0.85 → 0.92 (error rate ~8% вместо 15%)
-2. Обновлен `_route_toxic_classification()` в `runner.py`:
-   - Для author/guest: требуется повышенная осторожность
-   - Для content: стандартный threshold (менее рискованно)
-   - Все auto-ban логируются для аудита
-3. Добавлены комментарии о необходимости appeal mechanism
+**Текущая логика**:
+1. `target in (author, guest, content)` и `confidence >= 0.80` → кандидат на auto-ban
+2. затем `verify_auto_ban_candidates()` делает финальную LLM-проверку
+3. неподтверждённые кандидаты не банятся автоматически, а **downgrade в manual review**
+4. auto-banned пользователя можно **разбанить** из UI, сохранив audit trail
 
 **Файлы**:
-- `app/core/config.py`: auto_ban_threshold = 0.92
-- `app/services/appeal_analytics/runner.py`: enhanced routing logic
+- `app/core/config.py`: `auto_ban_threshold = 0.80`, `toxic_autoban_precision_review_threshold = 0.80`
+- `app/services/appeal_analytics/runner.py`: routing + final verification
+- `app/services/appeal_analytics/toxic_precision_refiner.py`: strict final verifier
+- `app/services/youtube_ban_service.py`: unban support / audit-preserving restore
 - `desktop/app/core/config.py`: синхронизировано
 
-**Тесты обновлены**: `tests/test_appeal_analytics.py`
+**Тесты обновлены**:
+- `tests/test_appeal_analytics.py`
+- `tests/test_toxic_moderation_prod.py`
 
 ### 2.2 Улучшение scoring в Question Refiner
 

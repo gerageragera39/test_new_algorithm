@@ -35,9 +35,9 @@ In the deployed backend:
 |---|---|---|
 | `/ui/` | `DashboardPage` | health, run controls, latest-report summary, appeal-trigger controls |
 | `/ui/videos` | `VideosPage` | per-video status monitor and navigation |
-| `/ui/budget` | `BudgetPage` | runtime settings and usage view |
+| `/ui/budget` | `BudgetPage` | runtime settings, OAuth/playlist settings, and usage view |
 | `/ui/reports/:videoId` | `ReportPage` | topic report detail |
-| `/ui/appeal/:videoId` | `AppealPage` | appeal analytics, toxic review, guest workflow |
+| `/ui/appeal/:videoId` | `AppealPage` | appeal analytics, toxic review, ban/unban workflow |
 | `/ui/404` | `NotFoundPage` | fallback route |
 
 For source-level details, see [`frontend/src/README.md`](./src/README.md).

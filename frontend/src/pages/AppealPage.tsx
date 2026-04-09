@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { ApiError, getAppealAnalytics, getToxicReview } from "../lib/api";
+import { ApiError, getAppealAnalytics, getToxicReview, unbanUser } from "../lib/api";
 import type { AppealAnalyticsResponse, AppealAuthorGroup, AppealBlock, AppealBlockItem, ToxicReviewResponse } from "../types/api";
 import { ToxicReviewPanel } from "../components/ToxicReviewPanel";
 
@@ -65,13 +65,38 @@ function ExpandableText({ text }: { text: string }) {
 
 function AuthorChip({
   author,
+  onUnbanComplete,
 }: {
   author: AppealAuthorGroup;
+  onUnbanComplete?: (bannedUserId: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [isUnbanning, setIsUnbanning] = useState(false);
+  const [unbanError, setUnbanError] = useState<string | null>(null);
+  const canUnban = author.banned_user_id != null;
 
   function handleClick() {
     setExpanded(!expanded);
+  }
+
+  async function handleUnban() {
+    if (!author.banned_user_id || isUnbanning) {
+      return;
+    }
+    setIsUnbanning(true);
+    setUnbanError(null);
+    try {
+      const result = await unbanUser(author.banned_user_id);
+      if (result.status !== "unbanned") {
+        throw new Error(result.youtube_error || "Не удалось снять бан.");
+      }
+      onUnbanComplete?.(author.banned_user_id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось снять бан.";
+      setUnbanError(message);
+    } finally {
+      setIsUnbanning(false);
+    }
   }
 
   return (
@@ -82,6 +107,24 @@ function AuthorChip({
       </button>
       {expanded ? (
         <div className="author-comments">
+          {canUnban ? (
+            <div style={{ marginBottom: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="btn secondary inline-btn"
+                onClick={() => void handleUnban()}
+                disabled={isUnbanning}
+              >
+                {isUnbanning ? "Снимаю бан..." : "Разбанить"}
+              </button>
+              {author.youtube_banned ? (
+                <span className="muted" style={{ fontSize: "0.85rem" }}>
+                  Попытаемся восстановить доступ и на YouTube.
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          {unbanError ? <div className="notice error">{unbanError}</div> : null}
           <ul className="quote-list expanded">
             {author.comments.map((c, i) => (
               <li key={`${c.comment_id}-${i}`}><ExpandableText text={c.text} /></li>
@@ -93,11 +136,21 @@ function AuthorChip({
   );
 }
 
-function AuthorGroupedBlock({ block }: { block: AppealBlock }) {
+function AuthorGroupedBlock({
+  block,
+  onUnbanComplete,
+}: {
+  block: AppealBlock;
+  onUnbanComplete?: (bannedUserId: number) => void;
+}) {
   return (
     <div className="appeal-authors-grid appeal-authors-columns">
       {block.authors.map((author) => (
-        <AuthorChip key={author.author_name} author={author} />
+        <AuthorChip
+          key={`${author.author_channel_id ?? author.author_name}-${author.banned_user_id ?? "no-ban"}`}
+          author={author}
+          onUnbanComplete={onUnbanComplete}
+        />
       ))}
       {block.authors.length === 0 ? <p className="muted">Нет комментариев.</p> : null}
     </div>
@@ -158,80 +211,94 @@ export function AppealPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let isMounted = true;
-
-    async function load() {
-      setIsLoading(true);
-      try {
-        const appealResponse = await getAppealAnalytics(videoId);
-        
-        // Try to load toxic review separately (may not exist)
-        let toxicResponse: ToxicReviewResponse | null = null;
-        let toxicError: string | null = null;
-        
-        try {
-          toxicResponse = await getToxicReview(videoId);
-        } catch (toxicErr) {
-          // Distinguish between "no review queue" vs actual error
-          const toxicMessage = toxicErr instanceof Error ? toxicErr.message : String(toxicErr);
-          if (toxicErr instanceof ApiError && toxicErr.status === 404) {
-            // No review queue is normal - leave toxicResponse as null
-            toxicError = null;
-          } else {
-            // Real error loading toxic review
-            toxicError = `Ошибка загрузки очереди модерации: ${toxicMessage}`;
-          }
-        }
-        
-        if (isMounted) {
-          setData(appealResponse);
-          setToxicReview(toxicResponse);
-          setToxicReviewError(toxicError);
-          setError(null);
-        }
-      } catch (loadError) {
-        if (isMounted) {
-          const message = loadError instanceof Error ? loadError.message : "Не удалось загрузить отчет";
-          setError(message);
-        }
-      } finally {
-        if (isMounted) {
-          setIsLoading(false);
-        }
-      }
+  const loadPageData = useCallback(async () => {
+    if (!videoId) {
+      setError("Отсутствует ID видео");
+      setIsLoading(false);
+      return;
     }
 
+    setIsLoading(true);
+    try {
+      const appealResponse = await getAppealAnalytics(videoId);
+
+      let toxicResponse: ToxicReviewResponse | null = null;
+      let toxicError: string | null = null;
+
+      try {
+        toxicResponse = await getToxicReview(videoId);
+      } catch (toxicErr) {
+        const toxicMessage = toxicErr instanceof Error ? toxicErr.message : String(toxicErr);
+        if (toxicErr instanceof ApiError && toxicErr.status === 404) {
+          toxicError = null;
+        } else {
+          toxicError = `Ошибка загрузки очереди модерации: ${toxicMessage}`;
+        }
+      }
+
+      setData(appealResponse);
+      setToxicReview(toxicResponse);
+      setToxicReviewError(toxicError);
+      setError(null);
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "Не удалось загрузить отчет";
+      setError(message);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [videoId]);
+
+  useEffect(() => {
     if (videoId) {
-      void load();
+      void loadPageData();
     } else {
       setError("Отсутствует ID видео");
       setIsLoading(false);
     }
-
-    return () => {
-      isMounted = false;
-    };
-  }, [videoId]);
+  }, [loadPageData, videoId]);
 
   async function handleBanComplete() {
-    // Reload toxic review after ban
-    if (videoId) {
-      try {
-        const toxicResponse = await getToxicReview(videoId);
-        setToxicReview(toxicResponse);
+    if (!videoId) return;
+    try {
+      const toxicResponse = await getToxicReview(videoId);
+      setToxicReview(toxicResponse);
+      setToxicReviewError(null);
+    } catch (toxicErr) {
+      const toxicMessage = toxicErr instanceof Error ? toxicErr.message : String(toxicErr);
+      if (toxicErr instanceof ApiError && toxicErr.status === 404) {
+        setToxicReview(null);
         setToxicReviewError(null);
-      } catch (toxicErr) {
-        const toxicMessage = toxicErr instanceof Error ? toxicErr.message : String(toxicErr);
-        if (toxicErr instanceof ApiError && toxicErr.status === 404) {
-          // No more items in review queue
-          setToxicReview(null);
-          setToxicReviewError(null);
-        } else {
-          setToxicReviewError(`Ошибка загрузки очереди модерации: ${toxicMessage}`);
-        }
+      } else {
+        setToxicReviewError(`Ошибка загрузки очереди модерации: ${toxicMessage}`);
       }
     }
+  }
+
+  async function handleUnbanComplete(bannedUserId: number) {
+    setData((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        blocks: prev.blocks.map((block) =>
+          block.block_type !== "toxic_auto_banned"
+            ? block
+            : {
+                ...block,
+                authors: block.authors.map((author) =>
+                  author.banned_user_id === bannedUserId
+                    ? {
+                        ...author,
+                        banned_user_id: null,
+                        is_banned_active: false,
+                        youtube_banned: false,
+                      }
+                    : author
+                ),
+              }
+        ),
+      };
+    });
+    await handleBanComplete();
   }
 
   return (
@@ -316,7 +383,7 @@ export function AppealPage() {
                     <p className="muted" style={{ marginTop: 12 }}>Нет комментариев для ручной проверки.</p>
                   )
                 ) : isAuthorGrouped ? (
-                  <AuthorGroupedBlock block={block} />
+                  <AuthorGroupedBlock block={block} onUnbanComplete={handleUnbanComplete} />
                 ) : (
                   <FlatBlock block={block} />
                 )}

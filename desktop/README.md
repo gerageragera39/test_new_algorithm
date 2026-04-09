@@ -44,8 +44,8 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
-npm --prefix frontend install
-npm --prefix frontend run build
+npm --prefix desktop/frontend install
+npm --prefix desktop/frontend run build
 python desktop_main.py
 ```
 
@@ -56,6 +56,12 @@ On first launch the desktop UI asks for:
 - OpenAI API key
 - YouTube API key
 - optional YouTube Playlist ID
+- optional `YOUTUBE_OAUTH_CLIENT_ID`
+- optional `YOUTUBE_OAUTH_CLIENT_SECRET`
+- optional `YOUTUBE_OAUTH_REFRESH_TOKEN`
+
+OAuth values are **not required** for the app to run, but they unlock channel-level
+ban / best-effort unban actions through YouTube moderation API.
 
 After setup you can manage the same values later from the **Dashboard** page.
 
@@ -70,7 +76,7 @@ python scripts/build_windows_exe.py
 ```
 
 Output:
-- `dist/YouTubeIntelDesktop/`
+- `dist/releases/<timestamp>/YouTubeIntelDesktop/`
 
 Deliver the whole folder, not only a single executable file.
 

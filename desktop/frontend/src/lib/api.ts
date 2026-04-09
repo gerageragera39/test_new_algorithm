@@ -14,6 +14,7 @@ import type {
   SetupStatusResponse,
   SetupUpdateRequest,
   ToxicReviewResponse,
+  UnbanUserResponse,
   VideoGuestsResponse,
   VideoStatusRow
 } from "../types/api";
@@ -201,6 +202,15 @@ export async function banUser(
     })
   });
   return parseResponse<BanUserResponse>(response);
+}
+
+export async function unbanUser(bannedUserId: number): Promise<UnbanUserResponse> {
+  const response = await fetch("/appeal/unban-user", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ banned_user_id: bannedUserId })
+  });
+  return parseResponse<UnbanUserResponse>(response);
 }
 
 export async function getVideoGuests(videoId: string): Promise<VideoGuestsResponse> {

@@ -66,7 +66,7 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 def _normalize_matrix(matrix: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
-    return matrix / norms
+    return np.asarray(matrix / norms, dtype=np.float32)
 
 
 class ClusteringService:
@@ -108,16 +108,18 @@ class ClusteringService:
 
         fit_result = self._fit_predict_adaptive(clustering_matrix)
         labels = fit_result.labels.copy()
-        assignments = self._build_assignments(
-            labels=labels,
-            probabilities=fit_result.probabilities,
-            clustering_matrix=clustering_matrix,
-        )
-        labels, assignments = self._soft_assign_noise_points(
-            labels=labels,
-            assignments=assignments,
-            clustering_matrix=clustering_matrix,
-        )
+        assignments: dict[int, CommentClusterAssignment] = {}
+        if self.settings.cluster_soft_assignment_enabled:
+            assignments = self._build_assignments(
+                labels=labels,
+                probabilities=fit_result.probabilities,
+                clustering_matrix=clustering_matrix,
+            )
+            labels, assignments = self._soft_assign_noise_points(
+                labels=labels,
+                assignments=assignments,
+                clustering_matrix=clustering_matrix,
+            )
 
         by_label: dict[int, list[int]] = {}
         for idx, label in enumerate(labels.tolist()):
@@ -178,6 +180,18 @@ class ClusteringService:
                 total_count=total_count,
                 total_weight=total_weight,
                 assignments=assignments,
+            )
+
+        # Apply post-clustering quality filter to remove low-confidence assignments
+        if self.settings.cluster_soft_assignment_enabled and assignments:
+            clusters, label_by_index, assignments = self._filter_low_quality_assignments(
+                clusters=clusters,
+                label_by_index=label_by_index,
+                assignments=assignments,
+                matrix=matrix,
+                weights=weights,
+                total_count=total_count,
+                total_weight=total_weight,
             )
 
         clusters = self._enforce_cluster_limit(
@@ -271,6 +285,8 @@ class ClusteringService:
                 ambiguous_member_count = sum(
                     1 for assignment in member_assignments if assignment.is_ambiguous
                 )
+        else:
+            confidence = self._group_coherence(members=members, matrix=matrix)
         ambiguous_share_pct = round(ambiguous_member_count / max(1, size_count) * 100, 2)
         return ClusterDraft(
             cluster_key=cluster_key,
@@ -411,7 +427,7 @@ class ClusteringService:
         scores = [_cosine_similarity(vec, centroid) for vec in group_matrix]
         if not scores:
             return 0.0
-        return float(max(0.0, min(1.0, np.mean(scores))))
+        return float(np.clip(np.mean(scores), 0.0, 1.0))
 
     def _fit_predict_adaptive(self, matrix: np.ndarray) -> _FitResult:
         total_count = int(matrix.shape[0])
@@ -446,8 +462,26 @@ class ClusteringService:
                 )
             except Exception:
                 silhouette = -1.0
+                
+            # Improved scoring function that balances multiple factors
             cluster_distance_penalty = abs(cluster_count - expected_clusters) / max(1, expected_clusters)
-            score = (1.0 - noise_ratio) * 2.5 + max(silhouette, 0.0) * 2.0 - cluster_distance_penalty
+            
+            # Coverage score (how many comments are in clusters vs noise)
+            coverage_score = 1.0 - noise_ratio
+            
+            # Quality score (silhouette, but penalize negative values more)
+            quality_score = silhouette if silhouette >= 0 else silhouette * 2.0
+                
+            # Cluster count preference (prefer closer to expected)
+            cluster_count_score = 1.0 - min(1.0, cluster_distance_penalty * 0.8)
+            
+            # Combined score with balanced weights
+            score = (
+                coverage_score * 3.0 +      # Coverage is very important
+                quality_score * 2.5 +        # Quality matters a lot
+                cluster_count_score * 1.5    # Prefer reasonable cluster count
+            )
+            
             self.logger.info(
                 "Clustering attempt min_cluster_size=%s min_samples=%s epsilon=%.3f -> clusters=%s noise_ratio=%.2f silhouette=%.3f score=%.3f",
                 params["min_cluster_size"],
@@ -472,8 +506,16 @@ class ClusteringService:
                     "expected_cluster_count": expected_clusters,
                 }
 
-            if cluster_count >= 2 and noise_ratio <= accept_noise_ratio and silhouette >= -0.05:
-                return _FitResult(labels=labels, probabilities=probs, parameter_summary=best_summary)
+            # Early acceptance with stricter criteria for high-quality results
+            if cluster_count >= 2 and noise_ratio <= accept_noise_ratio:
+                # Require positive silhouette for early acceptance
+                if silhouette >= 0.08:
+                    return _FitResult(labels=labels, probabilities=probs, parameter_summary=best_summary)
+                # Or very low noise with acceptable silhouette
+                if noise_ratio <= accept_noise_ratio * 0.6 and silhouette >= 0.0:
+                    return _FitResult(labels=labels, probabilities=probs, parameter_summary=best_summary)
+                    
+            # Small dataset acceptance
             if total_count < 40 and cluster_count >= 1 and noise_ratio <= accept_smallset_noise_ratio:
                 return _FitResult(labels=labels, probabilities=probs, parameter_summary=best_summary)
 
@@ -547,23 +589,47 @@ class ClusteringService:
         )
 
     def _candidate_params(self, total_count: int) -> list[dict[str, Any]]:
-        dynamic_min_cluster = max(
+        # More conservative min_cluster_size for better cluster quality
+        base_size = max(
             int(self.settings.cluster_min_size),
-            min(36, max(4, int(round(total_count * 0.02)))),
+            min(40, max(5, int(round(total_count * 0.025)))),
         )
-        variants = [
-            dynamic_min_cluster,
-            max(4, int(round(dynamic_min_cluster * 0.8))),
-            min(40, int(round(dynamic_min_cluster * 1.25))),
-        ]
+        
+        # Generate smarter variants based on dataset size
+        if total_count < 100:
+            # Small datasets: be more conservative
+            variants = [
+                base_size,
+                max(4, int(round(base_size * 0.75))),
+            ]
+        elif total_count < 300:
+            # Medium datasets: standard approach
+            variants = [
+                base_size,
+                max(4, int(round(base_size * 0.8))),
+                min(45, int(round(base_size * 1.2))),
+            ]
+        else:
+            # Large datasets: more variants for better exploration
+            variants = [
+                base_size,
+                max(5, int(round(base_size * 0.7))),
+                max(4, int(round(base_size * 0.85))),
+                min(50, int(round(base_size * 1.15))),
+            ]
+        
         candidates: list[dict[str, Any]] = []
-        for min_cluster_size in variants:
+        for min_cluster_size in sorted(set(variants)):
+            # Adaptive min_samples based on cluster size
             min_samples_values = {
                 max(1, int(self.settings.cluster_min_samples)),
-                max(1, int(round(min_cluster_size * 0.35))),
-                max(1, int(round(min_cluster_size * 0.5))),
+                max(1, int(round(min_cluster_size * 0.25))),
+                max(1, int(round(min_cluster_size * 0.40))),
             }
-            epsilon_values = (0.0, 0.025, 0.05)
+            
+            # More conservative epsilon values for better cluster separation
+            epsilon_values = (0.0, 0.02) if total_count < 150 else (0.0, 0.015, 0.03)
+                
             for min_samples in sorted(min_samples_values):
                 for epsilon in epsilon_values:
                     candidates.append(
@@ -573,6 +639,8 @@ class ClusteringService:
                             "cluster_selection_epsilon": float(epsilon),
                         }
                     )
+        
+        # Deduplicate
         deduped: list[dict[str, Any]] = []
         seen: set[tuple[int, int, float]] = set()
         for candidate in candidates:
@@ -706,7 +774,12 @@ class ClusteringService:
 
         result: list[ClusterDraft] = []
         for cluster in clusters:
-            if cluster.share_pct < min_share or cluster.size_count < 12:
+            if (
+                cluster.share_pct < min_share
+                or cluster.size_count < 12
+                or cluster.is_emerging
+                or cluster.cluster_key.startswith("emerging_")
+            ):
                 result.append(cluster)
                 continue
 
@@ -742,6 +815,20 @@ class ClusteringService:
                 result.append(cluster)
                 continue
 
+            if not self._passes_large_cluster_split_quality_gate(
+                cluster=cluster,
+                valid_groups=valid_groups,
+                matrix=matrix,
+            ):
+                self.logger.info(
+                    "Large cluster split quality gate rejected %s (size=%s share=%.1f%%).",
+                    cluster.cluster_key,
+                    cluster.size_count,
+                    cluster.share_pct,
+                )
+                result.append(cluster)
+                continue
+
             valid_groups.sort(key=len, reverse=True)
             for sub_idx, sub_members in enumerate(valid_groups):
                 result.append(
@@ -764,6 +851,94 @@ class ClusteringService:
             )
 
         return result
+
+    def _passes_large_cluster_split_quality_gate(
+        self,
+        *,
+        cluster: ClusterDraft,
+        valid_groups: list[list[int]],
+        matrix: np.ndarray,
+    ) -> bool:
+        """Accept a second split only when it clearly improves a mixed large cluster.
+
+        Large topical clusters are often valid and later pipeline stages already
+        know how to extract positions and representative comments inside them.
+        Therefore we should only split when the parent cluster is genuinely
+        heterogeneous and the candidate subgroups are meaningfully cleaner.
+        """
+        if not self._passes_noise_split_quality_gate(valid_groups=valid_groups, matrix=matrix):
+            return False
+
+        parent_size = max(1, len(cluster.member_indices))
+        parent_coherence = self._group_coherence(
+            members=cluster.member_indices,
+            matrix=matrix,
+        )
+        parent_confidence = float(cluster.assignment_confidence)
+        parent_ambiguous_share = float(cluster.ambiguous_share_pct)
+        parent_limit = float(self.settings.cluster_large_split_min_parent_coherence)
+
+        # Preserve already coherent dominant topics instead of forcing a second
+        # KMeans split that tends to over-fragment them.
+        if (
+            parent_coherence >= max(parent_limit, float(self.settings.topic_coherence_min) + 0.12)
+            and parent_confidence >= 0.78
+            and parent_ambiguous_share <= 30.0
+        ):
+            return False
+
+        child_sizes = [len(group) for group in valid_groups]
+        if not child_sizes:
+            return False
+        largest_child_share = max(child_sizes) / parent_size
+
+        child_coherences = [
+            self._group_coherence(members=group, matrix=matrix) for group in valid_groups
+        ]
+        weighted_child_coherence = float(
+            sum(
+                len(group) * coherence
+                for group, coherence in zip(valid_groups, child_coherences, strict=False)
+            )
+            / parent_size
+        )
+        min_child_coherence = min(child_coherences) if child_coherences else 0.0
+        coherence_gain = weighted_child_coherence - parent_coherence
+        min_gain = float(self.settings.cluster_large_split_min_coherence_gain)
+
+        # Reject splits where one dominant subgroup would keep almost the entire
+        # parent cluster, because that usually means KMeans is carving a healthy
+        # topic into arbitrary slices.
+        dominant_limit = float(self.settings.cluster_large_split_max_dominant_share_pct) / 100.0
+        if largest_child_share >= dominant_limit:
+            return False
+        if largest_child_share > 0.8 and coherence_gain < max(0.08, min_gain + 0.01):
+            return False
+
+        centroids = []
+        for group in valid_groups:
+            centroid = matrix[group].mean(axis=0)
+            centroids.append(centroid)
+        max_centroid_similarity = 0.0
+        for left_idx in range(len(centroids)):
+            for right_idx in range(left_idx + 1, len(centroids)):
+                max_centroid_similarity = max(
+                    max_centroid_similarity,
+                    _cosine_similarity(centroids[left_idx], centroids[right_idx]),
+                )
+
+        if parent_coherence >= parent_limit and coherence_gain < max(min_gain + 0.01, 0.07):
+            return False
+        if max_centroid_similarity > 0.92 and coherence_gain < max(min_gain + 0.01, 0.08):
+            return False
+        if coherence_gain >= min_gain and min_child_coherence >= max(0.34, parent_coherence + 0.02):
+            return True
+        return (
+            parent_coherence < max(parent_limit, float(self.settings.topic_coherence_min))
+            and parent_ambiguous_share >= 35.0
+            and coherence_gain >= 0.03
+            and max_centroid_similarity <= 0.9
+        )
 
     def _enforce_cluster_limit(
         self,
@@ -858,11 +1033,25 @@ class ClusteringService:
 
         keep: list[ClusterDraft] = []
         overflow_members: list[int] = []
+        emerging_other_coherence_min = float(self.settings.emerging_cluster_min_coherence)
+        
         for cluster in clusters:
             coherence = self._group_coherence(members=cluster.member_indices, matrix=matrix)
             is_small = cluster.size_count < max(12, self.settings.cluster_min_size * 2)
             is_low_share = cluster.share_pct < max(6.0, self.settings.cluster_large_split_min_share_pct / 4)
             is_ambiguous = cluster.ambiguous_share_pct >= 45.0
+            
+            # Special handling for emerging_other with low coherence
+            if cluster.cluster_key == "emerging_other" and coherence < emerging_other_coherence_min:
+                self.logger.info(
+                    "Filtering out low-coherence emerging_other cluster (coherence=%.3f < %.2f, size=%s)",
+                    coherence,
+                    emerging_other_coherence_min,
+                    cluster.size_count,
+                )
+                # Don't add to overflow - just drop these comments completely
+                continue
+            
             if (
                 is_small
                 and is_low_share
@@ -914,6 +1103,109 @@ class ClusteringService:
         else:
             keep.append(overflow_cluster)
         return keep
+
+    def _filter_low_quality_assignments(
+        self,
+        *,
+        clusters: list[ClusterDraft],
+        label_by_index: dict[int, str],
+        assignments: dict[int, CommentClusterAssignment],
+        matrix: np.ndarray,
+        weights: np.ndarray,
+        total_count: int,
+        total_weight: float,
+    ) -> tuple[list[ClusterDraft], dict[int, str], dict[int, CommentClusterAssignment]]:
+        """Remove comments with very low assignment confidence or far from centroids.
+        
+        This post-clustering filter removes noise that HDBSCAN couldn't separate properly.
+        """
+        # Calculate centroids for all clusters
+        cluster_centroids: dict[str, np.ndarray] = {}
+        for cluster in clusters:
+            cluster_centroids[cluster.cluster_key] = matrix[cluster.member_indices].mean(axis=0)
+        
+        # Find comments to remove
+        comments_to_remove: set[int] = set()
+        min_confidence_threshold = 0.35
+        min_centroid_similarity = 0.25
+        
+        for idx, assignment in assignments.items():
+            # Skip if already removed
+            if idx in comments_to_remove:
+                continue
+                
+            # Get assigned cluster
+            assigned_cluster_key = label_by_index.get(idx)
+            if not assigned_cluster_key:
+                continue
+                
+            # Check confidence threshold
+            if assignment.primary_confidence < min_confidence_threshold:
+                comments_to_remove.add(idx)
+                self.logger.debug(
+                    "Removing comment %d: low confidence %.3f", 
+                    idx, assignment.primary_confidence
+                )
+                continue
+            
+            # Check centroid similarity for non-noise points
+            if assigned_cluster_key in cluster_centroids:
+                centroid = cluster_centroids[assigned_cluster_key]
+                similarity = _cosine_similarity(matrix[idx], centroid)
+                if similarity < min_centroid_similarity:
+                    comments_to_remove.add(idx)
+                    self.logger.debug(
+                        "Removing comment %d: far from centroid %.3f", 
+                        idx, similarity
+                    )
+                    continue
+        
+        if not comments_to_remove:
+            return clusters, label_by_index, assignments
+        
+        self.logger.info(
+            "Post-clustering filter: removing %d low-quality assignments (%.1f%% of total)",
+            len(comments_to_remove),
+            len(comments_to_remove) / max(1, total_count) * 100,
+        )
+        
+        # Rebuild clusters without removed comments
+        new_clusters: list[ClusterDraft] = []
+        new_label_by_index: dict[int, str] = {}
+        new_assignments: dict[int, CommentClusterAssignment] = {}
+        
+        for cluster in clusters:
+            # Filter out removed comments
+            new_members = [idx for idx in cluster.member_indices if idx not in comments_to_remove]
+            
+            # Skip clusters that became too small
+            if len(new_members) < max(3, self.settings.cluster_min_samples):
+                self.logger.debug(
+                    "Dropping cluster %s: too small after filtering (%d members)",
+                    cluster.cluster_key, len(new_members)
+                )
+                continue
+            
+            # Rebuild cluster with remaining members
+            new_cluster = self._build_cluster(
+                cluster_key=cluster.cluster_key,
+                members=new_members,
+                matrix=matrix,
+                weights=weights,
+                total_count=total_count,
+                total_weight=total_weight,
+                assignments=assignments,
+                force_emerging=cluster.is_emerging,
+            )
+            new_clusters.append(new_cluster)
+            
+            # Update mappings
+            for idx in new_members:
+                new_label_by_index[idx] = new_cluster.cluster_key
+                if idx in assignments:
+                    new_assignments[idx] = assignments[idx]
+        
+        return new_clusters, new_label_by_index, new_assignments
 
     def _single_emerging_cluster(
         self,

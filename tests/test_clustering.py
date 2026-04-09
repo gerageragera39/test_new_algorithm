@@ -186,3 +186,271 @@ def test_clustering_soft_assigns_noise_when_near_existing_centroid(test_settings
 
     assert new_labels[2] == 0
     assert new_assignments[2].used_soft_assignment is True
+
+
+def test_large_cluster_split_keeps_emerging_other_unsplit(test_settings) -> None:
+    settings = test_settings.model_copy(
+        update={
+            "cluster_large_split_enabled": True,
+            "cluster_large_split_min_share_pct": 10.0,
+            "cluster_large_split_max_subgroups": 3,
+        }
+    )
+    service = ClusteringService(settings)
+    matrix = np.array(
+        [
+            [1.0, 0.0],
+            [0.99, 0.01],
+            [0.98, 0.02],
+            [0.97, 0.03],
+            [0.96, 0.04],
+            [0.95, 0.05],
+            [0.0, 1.0],
+            [0.01, 0.99],
+            [0.02, 0.98],
+            [0.03, 0.97],
+            [0.04, 0.96],
+            [0.05, 0.95],
+        ],
+        dtype=np.float32,
+    )
+    weights = np.ones(matrix.shape[0], dtype=np.float32)
+    cluster = service._build_cluster(
+        cluster_key="emerging_other",
+        members=list(range(matrix.shape[0])),
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+        force_emerging=True,
+    )
+
+    result = service._split_large_clusters(
+        clusters=[cluster],
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+
+    assert len(result) == 1
+    assert result[0].cluster_key == "emerging_other"
+
+
+def test_large_cluster_split_still_splits_genuinely_mixed_parent(test_settings) -> None:
+    settings = test_settings.model_copy(
+        update={
+            "cluster_large_split_enabled": True,
+            "cluster_large_split_min_share_pct": 10.0,
+            "cluster_large_split_max_subgroups": 3,
+            "cluster_large_split_min_parent_coherence": 0.75,
+            "cluster_large_split_min_coherence_gain": 0.04,
+            "cluster_large_split_max_dominant_share_pct": 80.0,
+        }
+    )
+    service = ClusteringService(settings)
+    matrix = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.99, 0.01, 0.0],
+            [0.98, 0.02, 0.0],
+            [0.97, 0.03, 0.0],
+            [0.96, 0.04, 0.0],
+            [0.95, 0.05, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.01, 0.99, 0.0],
+            [0.02, 0.98, 0.0],
+            [0.03, 0.97, 0.0],
+            [0.04, 0.96, 0.0],
+            [0.05, 0.95, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    weights = np.ones(matrix.shape[0], dtype=np.float32)
+    cluster = service._build_cluster(
+        cluster_key="cluster_0",
+        members=list(range(matrix.shape[0])),
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+
+    result = service._split_large_clusters(
+        clusters=[cluster],
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+
+    assert len(result) >= 2
+    assert all(item.cluster_key.startswith("cluster_0_sub") for item in result)
+
+
+def test_large_coherent_cluster_is_not_artificially_split(
+    test_settings, monkeypatch
+) -> None:
+    settings = test_settings.model_copy(
+        update={
+            "cluster_large_split_enabled": True,
+            "cluster_large_split_min_share_pct": 20.0,
+            "cluster_large_split_max_subgroups": 3,
+        }
+    )
+    service = ClusteringService(settings)
+
+    matrix = np.array(
+        [
+            [1.00, 0.00, 0.00],
+            [0.99, 0.01, 0.00],
+            [0.98, 0.02, 0.00],
+            [0.97, 0.03, 0.00],
+            [0.96, 0.04, 0.00],
+            [0.95, 0.05, 0.00],
+            [0.94, 0.06, 0.00],
+            [0.93, 0.07, 0.00],
+            [0.92, 0.08, 0.00],
+            [0.91, 0.09, 0.00],
+            [0.90, 0.10, 0.00],
+            [0.89, 0.11, 0.00],
+        ],
+        dtype=np.float32,
+    )
+    weights = np.ones(matrix.shape[0], dtype=np.float32)
+    cluster = service._build_cluster(
+        cluster_key="cluster_0",
+        members=list(range(matrix.shape[0])),
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+    cluster.assignment_confidence = 0.92
+
+    monkeypatch.setattr(service, "_passes_noise_split_quality_gate", lambda **_: True)
+
+    class DummyKMeans:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def fit_predict(self, _sub_matrix):
+            return np.array([0] * 6 + [1] * 6, dtype=np.int32)
+
+    monkeypatch.setattr("app.services.clustering.KMeans", DummyKMeans)
+
+    result = service._split_large_clusters(
+        clusters=[cluster],
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+
+    assert len(result) == 1
+    assert result[0].cluster_key == "cluster_0"
+
+
+def test_large_cluster_split_skips_already_coherent_cluster(
+    test_settings, monkeypatch
+) -> None:
+    settings = test_settings.model_copy(
+        update={
+            "cluster_large_split_enabled": True,
+            "cluster_large_split_min_share_pct": 10.0,
+            "cluster_large_split_max_subgroups": 3,
+            "cluster_noise_split_target_group_size": 4,
+            "cluster_large_split_min_parent_coherence": 0.7,
+        }
+    )
+    service = ClusteringService(settings)
+    matrix = np.array(
+        [
+            [1.00, 0.00],
+            [0.99, 0.01],
+            [0.98, 0.02],
+            [0.97, 0.03],
+            [0.96, 0.04],
+            [0.95, 0.05],
+            [0.94, 0.06],
+            [0.93, 0.07],
+            [0.92, 0.08],
+            [0.91, 0.09],
+            [0.90, 0.10],
+            [0.89, 0.11],
+        ],
+        dtype=np.float32,
+    )
+    weights = np.ones(matrix.shape[0], dtype=np.float32)
+    cluster = service._build_cluster(
+        cluster_key="cluster_0",
+        members=list(range(matrix.shape[0])),
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+    monkeypatch.setattr(service, "_passes_noise_split_quality_gate", lambda **_: True)
+
+    split = service._split_large_clusters(
+        clusters=[cluster],
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+
+    assert len(split) == 1
+    assert split[0].cluster_key == "cluster_0"
+
+
+def test_large_cluster_split_keeps_mixed_cluster_when_gain_is_real(test_settings) -> None:
+    settings = test_settings.model_copy(
+        update={
+            "cluster_large_split_enabled": True,
+            "cluster_large_split_min_share_pct": 10.0,
+            "cluster_large_split_max_subgroups": 3,
+            "cluster_noise_split_target_group_size": 4,
+            "cluster_large_split_min_parent_coherence": 0.95,
+            "cluster_large_split_min_coherence_gain": 0.03,
+            "cluster_large_split_max_dominant_share_pct": 80.0,
+        }
+    )
+    service = ClusteringService(settings)
+    matrix = np.array(
+        [
+            [1.0, 0.0],
+            [0.98, 0.02],
+            [0.97, 0.03],
+            [0.96, 0.04],
+            [0.0, 1.0],
+            [0.02, 0.98],
+            [0.03, 0.97],
+            [0.04, 0.96],
+            [0.70, 0.30],
+            [0.68, 0.32],
+            [0.32, 0.68],
+            [0.30, 0.70],
+        ],
+        dtype=np.float32,
+    )
+    weights = np.ones(matrix.shape[0], dtype=np.float32)
+    cluster = service._build_cluster(
+        cluster_key="cluster_0",
+        members=list(range(matrix.shape[0])),
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+
+    split = service._split_large_clusters(
+        clusters=[cluster],
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+
+    assert len(split) >= 2
+    assert all(item.cluster_key.startswith("cluster_0_sub") for item in split)

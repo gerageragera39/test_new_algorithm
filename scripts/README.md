@@ -9,6 +9,7 @@ Container startup scripts for backend services.
 | `start_api.sh` | Runs DB migrations then starts FastAPI (`uvicorn`) |
 | `start_worker.sh` | Starts Celery worker |
 | `start_beat.sh` | Starts Celery Beat scheduler |
+| `cleanup_script.py` | Fully clears configured DB and deletes `data/` |
 | `benchmark_topic_models.py` | Replays topic clustering on historical comments to compare embedding models |
 
 ## `start_api.sh`
@@ -46,3 +47,26 @@ Artifacts are written to:
 
 - `data/benchmarks/YYYY-MM-DD/topic_models_benchmark.json`
 - `data/benchmarks/YYYY-MM-DD/topic_models_benchmark.md`
+
+## `cleanup_script.py`
+
+Destructive cleanup utility for local/dev environments.
+
+Behavior:
+
+1. connects to `DATABASE_URL` from settings (`.env` / env vars),
+2. drops all DB tables via reflected metadata (including `alembic_version`),
+3. leaves schema empty so the next `alembic upgrade head` starts cleanly,
+3. deletes the configured `data_dir` (`data/` by default).
+
+Usage:
+
+```bash
+PYTHONPATH=. python scripts/cleanup_script.py
+```
+
+Non-interactive mode:
+
+```bash
+PYTHONPATH=. python scripts/cleanup_script.py --force
+```

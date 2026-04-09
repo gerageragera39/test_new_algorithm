@@ -24,6 +24,7 @@ from app.db.models import (
     AppealBlock,
     AppealBlockItem,
     AppealRun,
+    BannedUser,
     Cluster,
     ClusterItem,
     Comment,
@@ -32,6 +33,7 @@ from app.db.models import (
     Video,
     VideoSettings,
 )
+from app.db.session import SessionLocal
 from app.schemas.api import (
     AppealAnalyticsResponse,
     AppealAuthorGroup,
@@ -42,13 +44,19 @@ from app.schemas.api import (
     BanUserResponse,
     BudgetUsageResponse,
     HealthResponse,
+    QueueSnapshotResponse,
     ReportDetailResponse,
     ReportResponse,
     RunResponse,
     RuntimeSettingsResponse,
     RuntimeSettingsUpdateRequest,
+    SetupRequest,
+    SetupStatusResponse,
+    SetupUpdateRequest,
     ToxicReviewItemResponse,
     ToxicReviewResponse,
+    UnbanUserRequest,
+    UnbanUserResponse,
     UpdateVideoGuestsRequest,
     VideoDetailResponse,
     VideoGuestsResponse,
@@ -63,11 +71,13 @@ from app.services.pipeline import DailyRunService
 from app.services.runtime_settings import RuntimeSettingsState, RuntimeSettingsStore
 from app.services.toxic_training_service import ToxicTrainingService
 from app.services.youtube_ban_service import YouTubeBanService
-from app.workers.tasks import run_appeal_analytics_task, run_latest_task, run_video_task
+from desktop.bootstrap import get_setup_status, save_first_run_setup, update_setup
+from desktop.paths import resource_root
+from desktop.queue import get_task_queue
 
 api_router = APIRouter()
 ui_router = APIRouter()
-_SPA_INDEX_FILE = Path("frontend/dist/index.html")
+_SPA_INDEX_FILE = resource_root() / "frontend" / "dist" / "index.html"
 
 _OFFENSIVE_QUESTION_RE = re.compile(
     r"\b("
@@ -158,6 +168,62 @@ def _runtime_settings_to_response(state: RuntimeSettingsState) -> RuntimeSetting
         youtube_include_replies=state.youtube_include_replies,
         openai_enable_polish_call=state.openai_enable_polish_call,
     )
+
+
+def _setup_status_to_response() -> SetupStatusResponse:
+    status = get_setup_status()
+    return SetupStatusResponse(
+        is_configured=status.is_configured,
+        has_openai_api_key=status.has_openai_api_key,
+        has_youtube_api_key=status.has_youtube_api_key,
+        has_playlist_id=status.has_playlist_id,
+        has_youtube_oauth_client_id=status.has_youtube_oauth_client_id,
+        has_youtube_oauth_client_secret=status.has_youtube_oauth_client_secret,
+        has_youtube_oauth_refresh_token=status.has_youtube_oauth_refresh_token,
+        runtime_env_path=status.runtime_env_path,
+    )
+
+
+def _enqueue_latest_job(
+    *,
+    settings: Settings,
+    runtime_overrides: dict[str, Any],
+    skip_filtering: bool | None,
+) -> dict[str, Any]:
+    with SessionLocal() as job_db:
+        effective_settings = settings.model_copy(update=runtime_overrides)
+        service = DailyRunService(effective_settings, job_db)
+        return service.run_latest(skip_filtering=skip_filtering)
+
+
+def _enqueue_video_job(
+    *,
+    settings: Settings,
+    runtime_overrides: dict[str, Any],
+    video_url: str,
+    skip_filtering: bool | None,
+) -> dict[str, Any]:
+    with SessionLocal() as job_db:
+        effective_settings = settings.model_copy(update=runtime_overrides)
+        service = DailyRunService(effective_settings, job_db)
+        return service.run_video(video_url=video_url, skip_filtering=skip_filtering)
+
+
+def _enqueue_appeal_job(
+    *,
+    settings: Settings,
+    runtime_overrides: dict[str, Any],
+    video_url: str | None,
+    guest_names: list[str] | None,
+) -> dict[str, Any]:
+    from app.services.appeal_analytics import AppealAnalyticsService
+
+    with SessionLocal() as job_db:
+        effective_settings = settings.model_copy(update=runtime_overrides)
+        service = AppealAnalyticsService(effective_settings, job_db)
+        if video_url:
+            return service.run_for_video_url(video_url=video_url, guest_names=guest_names)
+        return service.run_for_latest(guest_names=guest_names)
 
 
 def _coerce_optional_bool(value: Any, *, field_name: str) -> bool | None:
@@ -541,6 +607,46 @@ def health(settings: Settings = Depends(get_settings_dep)) -> HealthResponse:
     )
 
 
+@api_router.get("/app/setup/status", response_model=SetupStatusResponse)
+def get_desktop_setup_status() -> SetupStatusResponse:
+    """Return desktop first-run setup status."""
+    return _setup_status_to_response()
+
+
+@api_router.post("/app/setup", response_model=SetupStatusResponse)
+def complete_desktop_setup(payload: SetupRequest) -> SetupStatusResponse:
+    """Persist desktop setup secrets and optional moderation OAuth credentials."""
+    save_first_run_setup(
+        openai_api_key=payload.openai_api_key,
+        youtube_api_key=payload.youtube_api_key,
+        youtube_playlist_id=payload.youtube_playlist_id,
+        youtube_oauth_client_id=payload.youtube_oauth_client_id,
+        youtube_oauth_client_secret=payload.youtube_oauth_client_secret,
+        youtube_oauth_refresh_token=payload.youtube_oauth_refresh_token,
+    )
+    return _setup_status_to_response()
+
+
+@api_router.put("/app/setup", response_model=SetupStatusResponse)
+def update_desktop_setup(payload: SetupUpdateRequest) -> SetupStatusResponse:
+    """Update stored desktop secrets without requiring every field."""
+    update_setup(
+        openai_api_key=payload.openai_api_key,
+        youtube_api_key=payload.youtube_api_key,
+        youtube_playlist_id=payload.youtube_playlist_id,
+        youtube_oauth_client_id=payload.youtube_oauth_client_id,
+        youtube_oauth_client_secret=payload.youtube_oauth_client_secret,
+        youtube_oauth_refresh_token=payload.youtube_oauth_refresh_token,
+    )
+    return _setup_status_to_response()
+
+
+@api_router.get("/queue", response_model=QueueSnapshotResponse)
+def queue_snapshot() -> QueueSnapshotResponse:
+    """Return the local desktop queue snapshot."""
+    return QueueSnapshotResponse(**get_task_queue().snapshot())
+
+
 @api_router.post("/run/latest", response_model=RunResponse)
 def run_latest(
     sync: bool = False,
@@ -549,7 +655,7 @@ def run_latest(
     db: Session = Depends(get_db_dep),
     settings: Settings = Depends(get_settings_dep),
 ) -> RunResponse:
-    """Trigger an analysis run for the latest video, synchronously or via Celery."""
+    """Trigger an analysis run for the latest video, synchronously or via local queue."""
     runtime_store = RuntimeSettingsStore(settings)
     runtime_state = runtime_store.load()
     effective_settings = runtime_store.build_pipeline_settings(runtime_state)
@@ -575,9 +681,17 @@ def run_latest(
             task_id=f"sync-{result['run_id']}", message=f"Completed run for {result['video_id']}"
         )
 
-    task = run_latest_task.delay(
-        skip_filtering=resolved_skip_filtering,
-        runtime_overrides=runtime_overrides,
+    task = get_task_queue().enqueue(
+        "run_latest",
+        {
+            "skip_filtering": resolved_skip_filtering,
+            "runtime_overrides": runtime_overrides,
+        },
+        lambda: _enqueue_latest_job(
+            settings=settings,
+            runtime_overrides=runtime_overrides,
+            skip_filtering=resolved_skip_filtering,
+        ),
     )
     return RunResponse(task_id=task.id, message="Run triggered")
 
@@ -629,10 +743,19 @@ def run_video(
             task_id=f"sync-{result['run_id']}", message=f"Completed run for {result['video_id']}"
         )
 
-    task = run_video_task.delay(
-        video_url=resolved_video_url,
-        skip_filtering=resolved_skip_filtering,
-        runtime_overrides=runtime_overrides,
+    task = get_task_queue().enqueue(
+        "run_video",
+        {
+            "video_url": resolved_video_url,
+            "skip_filtering": resolved_skip_filtering,
+            "runtime_overrides": runtime_overrides,
+        },
+        lambda: _enqueue_video_job(
+            settings=settings,
+            runtime_overrides=runtime_overrides,
+            video_url=resolved_video_url,
+            skip_filtering=resolved_skip_filtering,
+        ),
     )
     return RunResponse(task_id=task.id, message="Video run triggered")
 
@@ -829,10 +952,19 @@ async def run_appeal_analytics(
     runtime_store = RuntimeSettingsStore(settings)
     runtime_state = runtime_store.load()
     runtime_overrides = runtime_store.pipeline_overrides(runtime_state)
-    task = run_appeal_analytics_task.delay(
-        video_url=resolved_video_url or None,
-        guest_names=resolved_guest_names,
-        runtime_overrides=runtime_overrides,
+    task = get_task_queue().enqueue(
+        "run_appeal_analytics",
+        {
+            "video_url": resolved_video_url or None,
+            "guest_names": resolved_guest_names,
+            "runtime_overrides": runtime_overrides,
+        },
+        lambda: _enqueue_appeal_job(
+            settings=settings,
+            runtime_overrides=runtime_overrides,
+            video_url=resolved_video_url or None,
+            guest_names=resolved_guest_names,
+        ),
     )
     return RunResponse(task_id=task.id, message="Appeal analytics triggered")
 
@@ -881,12 +1013,32 @@ def get_appeal_analytics(
         if block_ids
         else []
     )
+    block_by_id = {block.id: block for block in blocks_db}
     all_comment_ids = [item.comment_id for item in all_items_db]
     comments_map: dict[int, Comment] = (
         {c.id: c for c in db.scalars(select(Comment).where(Comment.id.in_(all_comment_ids)))}
         if all_comment_ids
         else {}
     )
+    auto_ban_comment_ids = [
+        item.comment_id
+        for item in all_items_db
+        if block_by_id.get(item.block_id) is not None
+        and block_by_id[item.block_id].block_type == "toxic_auto_banned"
+    ]
+    banned_by_comment_id: dict[int, BannedUser] = {}
+    if auto_ban_comment_ids:
+        banned_rows = list(
+            db.scalars(
+                select(BannedUser)
+                .where(BannedUser.comment_id.in_(auto_ban_comment_ids))
+                .where(BannedUser.unbanned_at.is_(None))
+                .order_by(BannedUser.banned_at.desc())
+            )
+        )
+        for banned_row in banned_rows:
+            if banned_row.comment_id is not None:
+                banned_by_comment_id.setdefault(banned_row.comment_id, banned_row)
     items_by_block: dict[int, list[AppealBlockItem]] = {}
     for item in all_items_db:
         items_by_block.setdefault(item.block_id, []).append(item)
@@ -910,6 +1062,7 @@ def get_appeal_analytics(
                     author_name=item.author_name,
                     text=_normalize_comment_text(comment.text_raw if comment else ""),
                     score=score,
+                    author_channel_id=comment.author_channel_id if comment else None,
                 )
             )
 
@@ -920,16 +1073,32 @@ def get_appeal_analytics(
         # Group by author for toxic block
         if block_db.block_type == "toxic_auto_banned":
             by_author: dict[str, list[AppealBlockItemResponse]] = {}
+            author_meta: dict[str, dict[str, Any]] = {}
             for item in api_items:
                 name = item.author_name or "Unknown"
-                by_author.setdefault(name, []).append(item)
+                comment = comments_map.get(item.comment_id)
+                group_key = comment.author_channel_id or f"name:{name}"
+                by_author.setdefault(group_key, []).append(item)
+                if group_key not in author_meta:
+                    banned_user = banned_by_comment_id.get(item.comment_id)
+                    author_meta[group_key] = {
+                        "author_name": name,
+                        "author_channel_id": comment.author_channel_id if comment else None,
+                        "banned_user_id": banned_user.id if banned_user else None,
+                        "youtube_banned": bool(banned_user.youtube_banned) if banned_user else False,
+                    }
             authors = [
                 AppealAuthorGroup(
-                    author_name=name,
+                    author_name=meta["author_name"],
+                    author_channel_id=meta["author_channel_id"],
+                    banned_user_id=meta["banned_user_id"],
+                    is_banned_active=meta["banned_user_id"] is not None,
+                    youtube_banned=meta["youtube_banned"],
                     comment_count=len(items),
                     comments=items,
                 )
-                for name, items in sorted(by_author.items(), key=lambda x: -len(x[1]))
+                for key, items in sorted(by_author.items(), key=lambda x: -len(x[1]))
+                for meta in [author_meta[key]]
             ]
             blocks.append(
                 AppealBlockResponse(
@@ -1037,19 +1206,21 @@ def get_toxic_review(
 
     # Get all items in this block with their comments
     # Exclude already banned users from review (prefer channel_id, fallback to username)
-    from app.db.models import BannedUser
-
     banned_channel_ids = set(
         db.scalars(
             select(BannedUser.author_channel_id)
             .where(BannedUser.author_channel_id.isnot(None))
+            .where(BannedUser.unbanned_at.is_(None))
             .distinct()
         )
     )
 
     banned_fallback_usernames = set(
         db.scalars(
-            select(BannedUser.username).where(BannedUser.author_channel_id.is_(None)).distinct()
+            select(BannedUser.username)
+            .where(BannedUser.author_channel_id.is_(None))
+            .where(BannedUser.unbanned_at.is_(None))
+            .distinct()
         )
     )
 
@@ -1145,6 +1316,40 @@ def ban_user(
     )
 
 
+@api_router.post("/appeal/unban-user", response_model=UnbanUserResponse)
+def unban_user(
+    request: UnbanUserRequest,
+    db: Session = Depends(get_db_dep),
+    settings: Settings = Depends(get_settings_dep),
+) -> UnbanUserResponse:
+    """Lift a previously recorded ban and restore local access."""
+    ban_service = YouTubeBanService(settings, db)
+    result = ban_service.unban_user(
+        banned_user_id=request.banned_user_id,
+        unban_reason=request.unban_reason or "Разбанен админом",
+        unbanned_by_admin=True,
+    )
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="Ban record not found")
+
+    banned_user = db.get(BannedUser, request.banned_user_id)
+    if banned_user and banned_user.comment_id is not None:
+        training_service = ToxicTrainingService(db)
+        training_service.save_toxic_label(
+            comment_id=banned_user.comment_id,
+            video_id=banned_user.video_id,
+            is_toxic=False,
+            confidence_score=max(0.0, float(banned_user.confidence_score)),
+            insult_target=banned_user.insult_target,
+            labeled_by="admin",
+        )
+
+    return UnbanUserResponse(
+        status=result["status"],
+        banned_user_id=result.get("banned_user_id"),
+        youtube_unbanned=result.get("youtube_unbanned", False),
+        youtube_error=result.get("youtube_error"),
+    )
 @api_router.get("/settings/video-guests/{video_id}", response_model=VideoGuestsResponse)
 def get_video_guests(
     video_id: str,

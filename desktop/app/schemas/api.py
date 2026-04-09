@@ -30,6 +30,28 @@ class RunResponse(BaseModel):
     message: str
 
 
+class QueueJobResponse(BaseModel):
+    """Serialized desktop queue job."""
+
+    id: str
+    kind: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+    result: dict[str, Any] | None = None
+
+
+class QueueSnapshotResponse(BaseModel):
+    """Current state of the local desktop sequential queue."""
+
+    current: QueueJobResponse | None = None
+    queued: list[QueueJobResponse] = Field(default_factory=list)
+    recent: list[QueueJobResponse] = Field(default_factory=list)
+
+
 class VideoItemResponse(BaseModel):
     """Summary of a video for list endpoints."""
 
@@ -108,12 +130,17 @@ class AppealBlockItemResponse(BaseModel):
     author_name: str | None = None
     text: str = ""
     score: int | None = None
+    author_channel_id: str | None = None
 
 
 class AppealAuthorGroup(BaseModel):
     """Group of comments from the same author within a block."""
 
     author_name: str
+    author_channel_id: str | None = None
+    banned_user_id: int | None = None
+    is_banned_active: bool = False
+    youtube_banned: bool = False
     comment_count: int = 0
     comments: list[AppealBlockItemResponse] = Field(default_factory=list)
 
@@ -162,6 +189,41 @@ class RuntimeSettingsResponse(BaseModel):
     max_comments_per_video: int = 1500
     youtube_include_replies: bool = False
     openai_enable_polish_call: bool = True
+
+
+class SetupStatusResponse(BaseModel):
+    """Desktop bootstrap status for the first-run setup flow."""
+
+    is_configured: bool
+    has_openai_api_key: bool
+    has_youtube_api_key: bool
+    has_playlist_id: bool
+    has_youtube_oauth_client_id: bool = False
+    has_youtube_oauth_client_secret: bool = False
+    has_youtube_oauth_refresh_token: bool = False
+    runtime_env_path: str
+
+
+class SetupRequest(BaseModel):
+    """Payload for first-run desktop setup."""
+
+    openai_api_key: str
+    youtube_api_key: str
+    youtube_playlist_id: str | None = None
+    youtube_oauth_client_id: str | None = None
+    youtube_oauth_client_secret: str | None = None
+    youtube_oauth_refresh_token: str | None = None
+
+
+class SetupUpdateRequest(BaseModel):
+    """Partial update for stored desktop secrets/runtime bootstrap values."""
+
+    openai_api_key: str | None = None
+    youtube_api_key: str | None = None
+    youtube_playlist_id: str | None = None
+    youtube_oauth_client_id: str | None = None
+    youtube_oauth_client_secret: str | None = None
+    youtube_oauth_refresh_token: str | None = None
 
 
 class RuntimeSettingsUpdateRequest(BaseModel):
@@ -266,6 +328,22 @@ class BanUserResponse(BaseModel):
     youtube_banned: bool
     youtube_error: str | None = None
     csv_saved: bool
+
+
+class UnbanUserRequest(BaseModel):
+    """Request to restore a previously banned commenter."""
+
+    banned_user_id: int
+    unban_reason: str | None = None
+
+
+class UnbanUserResponse(BaseModel):
+    """Response after attempting to restore a banned commenter."""
+
+    status: str
+    banned_user_id: int | None = None
+    youtube_unbanned: bool
+    youtube_error: str | None = None
 
 
 class VideoGuestsResponse(BaseModel):

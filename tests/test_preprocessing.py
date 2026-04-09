@@ -158,6 +158,7 @@ def test_preprocess_moderation_drops_spam_link(test_settings) -> None:
 
 
 def test_preprocess_moderation_drops_profanity_only(test_settings) -> None:
+    settings = test_settings.model_copy(update={"comment_min_words": 1})
     video = VideoMeta(
         youtube_video_id="v6",
         playlist_id="pl",
@@ -173,7 +174,7 @@ def test_preprocess_moderation_drops_profanity_only(test_settings) -> None:
         )
     ]
 
-    result = CommentPreprocessor(test_settings).preprocess(comments, video)
+    result = CommentPreprocessor(settings).preprocess(comments, video)
     assert result.filtered_count == 1
     assert result.dropped_by_reason.get("profanity_only") == 1
 

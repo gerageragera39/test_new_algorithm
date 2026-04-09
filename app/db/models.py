@@ -306,6 +306,11 @@ class BannedUser(TimestampMixin, Base):
     youtube_banned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     youtube_ban_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     banned_by_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    unbanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    youtube_unbanned: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    youtube_unban_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unbanned_by_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    unban_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     video: Mapped[Video] = relationship()
     comment: Mapped[Comment | None] = relationship()

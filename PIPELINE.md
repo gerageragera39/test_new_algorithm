@@ -267,9 +267,10 @@ All `question` candidates are enriched via a second LLM call that assigns:
 - Retains only criticism backed by political argument
 - Drops non-political complaints (production quality, audio, etc.)
 
-**Local Question Mark Check:**
-- Question candidates without "?" in text moved back to criticism
-- Prevents argumentative comments from polluting question block
+**Question Precision Cleanup:**
+- low-value `attack_ragebait` / `meme_one_liner` items are removed from `constructive_question`
+- weak `clarification_needed` items without a real local question signal are demoted back to criticism
+- prevents argumentative / sarcastic comments from polluting the constructive question block
 
 ## Stage A4: Enhanced Toxic Classification + Auto-Ban + Manual Review
 
@@ -286,9 +287,13 @@ Components: `toxic_classifier.py`, `youtube_ban_service.py`, `toxic_training_ser
    - `third_party`: insults to politicians/public figures → **IGNORED**
 3. **Confidence Scoring**: LLM assigns 0.0-1.0 confidence
 4. **Split Decision**:
-   - **Auto-ban**: `target in (author, guest, content)` AND `confidence >= AUTO_BAN_THRESHOLD` (0.85)
+   - **Auto-ban candidate**: `target in (author, guest, content)` AND `confidence >= 0.80`
    - **Manual review**: every remaining non-`third_party` toxic candidate not auto-banned
    - **Ignored**: `target == third_party`
+5. **Final verification before auto-ban**:
+   - every auto-ban candidate goes through a strict second-pass verifier;
+   - only comments confirmed again stay in `toxic_auto_banned`;
+   - rejected candidates are downgraded to `toxic_manual_review`
 
 **CRITICAL**:
 - `third_party` insults are **NEVER** auto-banned, regardless of confidence.
@@ -302,6 +307,7 @@ Components: `toxic_classifier.py`, `youtube_ban_service.py`, `toxic_training_ser
 - Save to `toxic_training_data` for ML training
 - Uses author channel ID as the primary stable identity when available
 - Duplicate suppression and review exclusion are channel-wide, matching YouTube semantics
+- auto-banned users can later be restored through `/appeal/unban-user` from the operator UI
 
 **Manual Review Queue:**
 - Sorted by confidence, but includes lower-confidence non-`third_party` cases as fallback review items
@@ -329,6 +335,7 @@ API read model:
 - `/appeal/{video_id}` returns block summaries and comments
 - `/appeal/{video_id}/toxic-review` returns manual review queue (excludes banned users)
 - `POST /appeal/ban-user` executes manual ban from admin panel
+- `POST /appeal/unban-user` marks a ban inactive and attempts best-effort YouTube comment restore
 - For `toxic_auto_banned`, items grouped by author
 - For `toxic_manual_review`, items displayed with ban action in UI
 

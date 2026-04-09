@@ -282,6 +282,30 @@ def test_heuristic_classifies_question_with_author_reference() -> None:
     assert 3 in result["question"]
 
 
+def test_heuristic_classifies_question_without_question_mark() -> None:
+    """Interrogative wording should be enough for heuristic question detection."""
+    from app.services.appeal_analytics.llm_classifier import _classify_batch_heuristic
+
+    comment = _make_comment(
+        30,
+        "Автор, почему вы не раскрыли источник этой оценки без знака вопроса",
+    )
+    result = _classify_batch_heuristic([comment], author_name="Иван")
+    assert 30 in result["question"]
+
+
+def test_heuristic_classifies_directive_request_without_author_mention() -> None:
+    """Imperative content requests should still land in the appeal block."""
+    from app.services.appeal_analytics.llm_classifier import _classify_batch_heuristic
+
+    comment = _make_comment(
+        31,
+        "Разберите, пожалуйста, отдельно тему санкций в следующем видео",
+    )
+    result = _classify_batch_heuristic([comment], author_name="Иван")
+    assert 31 in result["appeal"]
+
+
 def test_heuristic_does_not_classify_unrelated_comment() -> None:
     """A comment without any author reference stays unclassified (effectively skip)."""
     from app.services.appeal_analytics.llm_classifier import _classify_batch_heuristic
@@ -1208,6 +1232,79 @@ def test_toxic_precision_filter_drops_ambiguous() -> None:
     assert 1 not in kept, "Low-confidence sharp criticism must be dropped"
 
 
+def test_auto_ban_verification_parse_keeps_only_explicit_approvals() -> None:
+    from app.services.appeal_analytics.toxic_precision_refiner import (
+        _parse_auto_ban_verification_response,
+    )
+
+    raw = {
+        "results": {
+            "1": {
+                "allow_auto_ban": True,
+                "confidence": 0.96,
+                "target_confirmed": "author",
+            },
+            "2": {
+                "allow_auto_ban": False,
+                "confidence": 0.22,
+                "target_confirmed": "third_party",
+            },
+        }
+    }
+
+    parsed = _parse_auto_ban_verification_response(raw, {1, 2})
+    assert parsed[1]["allow_auto_ban"] is True
+    assert parsed[1]["target_confirmed"] == "author"
+    assert parsed[2]["allow_auto_ban"] is False
+    assert parsed[2]["target_confirmed"] == "third_party"
+
+
+def test_verify_auto_ban_candidates_rejects_third_party_sarcasm() -> None:
+    from app.services.appeal_analytics.toxic_precision_refiner import (
+        verify_auto_ban_candidates,
+    )
+    from app.services.labeling import OpenAIChatProvider
+
+    comments = [
+        _make_comment(1, "Автор, вы просто идиот."),
+        _make_comment(2, "Путин, конечно, гений... какой же идиот."),
+    ]
+    toxic_metadata = {
+        1: {"insult_target": "author"},
+        2: {"insult_target": "author"},  # upstream made a mistake
+    }
+    mock_provider = MagicMock(spec=OpenAIChatProvider)
+
+    def mock_llm(*_args, **_kwargs):
+        return {
+            "results": {
+                "1": {
+                    "allow_auto_ban": True,
+                    "confidence": 0.98,
+                    "target_confirmed": "author",
+                },
+                "2": {
+                    "allow_auto_ban": False,
+                    "confidence": 0.18,
+                    "target_confirmed": "third_party",
+                },
+            }
+        }
+
+    approved = verify_auto_ban_candidates(
+        comments,
+        author_name="Автор",
+        guest_names=[],
+        toxic_metadata=toxic_metadata,
+        llm_provider=mock_provider,
+        request_llm_json=mock_llm,
+        confidence_threshold=0.93,
+    )
+
+    assert 1 in approved
+    assert 2 not in approved
+
+
 # ---------------------------------------------------------------------------
 # 19. Spam not in active pipeline
 # ---------------------------------------------------------------------------
@@ -1308,20 +1405,44 @@ def test_question_signal_word_does_not_require_question_mark() -> None:
     assert has_question_signal("автор, почему вы выбрали именно эту тему")
 
 
+def test_question_partition_demotes_ragebait_and_borderline_non_questions() -> None:
+    from app.services.appeal_analytics.runner import _partition_constructive_question_candidates
+
+    comment_map = {
+        1: _make_comment(1, "Автор, почему вы опять врёте людям"),
+        2: _make_comment(2, "Автор, можно раскрыть источники по этой теме?"),
+        3: _make_comment(3, "Автор, поясните позицию по санкциям"),
+    }
+    refiner_data = {
+        1: {"question_type": "attack_ragebait", "score": 2},
+        2: {"question_type": "analysis_why_how", "score": 8},
+        3: {"question_type": "clarification_needed", "score": 4},
+    }
+
+    kept, demoted = _partition_constructive_question_candidates(
+        question_candidate_ids=[1, 2, 3],
+        comment_map=comment_map,
+        refiner_data=refiner_data,
+    )
+
+    assert kept == [2]
+    assert demoted == [1, 3]
+
+
 # ---------------------------------------------------------------------------
 # Toxic Classification Tests: third_party exclusion, routing policy
 # ---------------------------------------------------------------------------
 
 
 def test_toxic_third_party_never_auto_banned_high_confidence() -> None:
-    """third_party insults must NEVER be auto-banned, even with confidence >= 0.92."""
+    """third_party insults must NEVER be auto-banned, even with confidence >= 0.80."""
     from app.services.appeal_analytics.runner import _route_toxic_classification
 
     assert (
         _route_toxic_classification(
             target="third_party",
             confidence=0.95,
-            auto_ban_threshold=0.92,
+            auto_ban_threshold=0.80,
         )
         == "ignore"
     )
@@ -1329,21 +1450,21 @@ def test_toxic_third_party_never_auto_banned_high_confidence() -> None:
         _route_toxic_classification(
             target="author",
             confidence=0.95,
-            auto_ban_threshold=0.92,
+            auto_ban_threshold=0.80,
         )
         == "auto_ban"
     )
 
 
 def test_toxic_author_high_confidence_auto_banned() -> None:
-    """author insults with confidence >= 0.92 must be auto-banned."""
+    """author insults with confidence >= 0.80 must be auto-banned."""
     from app.services.appeal_analytics.runner import _route_toxic_classification
 
     assert (
         _route_toxic_classification(
             target="author",
-            confidence=0.90,
-            auto_ban_threshold=0.92,
+            confidence=0.80,
+            auto_ban_threshold=0.80,
         )
         == "auto_ban"
     )
@@ -1357,7 +1478,7 @@ def test_toxic_guest_medium_confidence_manual_review() -> None:
         _route_toxic_classification(
             target="guest",
             confidence=0.70,
-            auto_ban_threshold=0.92,
+            auto_ban_threshold=0.80,
         )
         == "manual_review"
     )
@@ -1371,7 +1492,7 @@ def test_toxic_undefined_medium_confidence_manual_review() -> None:
         _route_toxic_classification(
             target="undefined",
             confidence=0.60,
-            auto_ban_threshold=0.92,
+            auto_ban_threshold=0.80,
         )
         == "manual_review"
     )
@@ -1379,7 +1500,7 @@ def test_toxic_undefined_medium_confidence_manual_review() -> None:
         _route_toxic_classification(
             target="undefined",
             confidence=0.98,
-            auto_ban_threshold=0.92,
+            auto_ban_threshold=0.80,
         )
         == "manual_review"
     )
@@ -1393,7 +1514,7 @@ def test_toxic_low_confidence_non_third_party_still_reviewed() -> None:
         _route_toxic_classification(
             target="author",
             confidence=0.45,
-            auto_ban_threshold=0.92,
+            auto_ban_threshold=0.80,
         )
         == "manual_review"
     )
@@ -1401,7 +1522,7 @@ def test_toxic_low_confidence_non_third_party_still_reviewed() -> None:
         _route_toxic_classification(
             target="content",
             confidence=0.30,
-            auto_ban_threshold=0.92,
+            auto_ban_threshold=0.80,
         )
         == "manual_review"
     )
@@ -1414,8 +1535,45 @@ def test_toxic_content_high_confidence_auto_banned() -> None:
     assert (
         _route_toxic_classification(
             target="content",
-            confidence=0.88,
-            auto_ban_threshold=0.92,
+            confidence=0.80,
+            auto_ban_threshold=0.80,
         )
         == "auto_ban"
     )
+
+
+def test_precision_review_downgrades_rejected_autobans_to_manual_review(
+    test_settings, db_session, monkeypatch
+) -> None:
+    from app.services.appeal_analytics.runner import AppealAnalyticsService
+
+    service = AppealAnalyticsService(test_settings, db_session)
+    comment_map = {
+        1: _make_comment(1, "автор мудак"),
+        2: _make_comment(2, "канал позор"),
+    }
+    toxic_metadata = {
+        1: {"insult_target": "author", "confidence_score": 0.97},
+        2: {"insult_target": "content", "confidence_score": 0.95},
+    }
+
+    monkeypatch.setattr(
+        "app.services.appeal_analytics.runner.verify_auto_ban_candidates",
+        lambda comments, *args, **kwargs: {
+            comments[0].id: {"confidence": 0.98, "target_confirmed": "author"}
+        },
+    )
+
+    confirmed, downgraded = service._apply_toxic_autoban_precision_review(
+        auto_ban_ids=[1, 2],
+        comment_map_full=comment_map,
+        toxic_metadata=toxic_metadata,
+        llm_provider=MagicMock(),
+        author_name="Автор",
+        guest_names=[],
+    )
+
+    assert confirmed == [1]
+    assert downgraded == [2]
+    assert toxic_metadata[1]["precision_review_status"] == "confirmed_auto_ban"
+    assert toxic_metadata[2]["precision_review_status"] == "downgraded_to_manual_review"

@@ -29,6 +29,9 @@ from app.services.appeal_analytics.llm_classifier import classify_unified_llm, h
 from app.services.appeal_analytics.political_criticism_refiner import filter_political_criticism
 from app.services.appeal_analytics.question_refiner import refine_questions
 from app.services.appeal_analytics.toxic_classifier import classify_toxic_with_targets
+from app.services.appeal_analytics.toxic_precision_refiner import (
+    verify_auto_ban_candidates,
+)
 from app.services.budget import BudgetGovernor
 from app.services.labeling import LLMProvider, OpenAIChatProvider
 from app.services.toxic_training_service import ToxicTrainingService
@@ -50,6 +53,19 @@ _BLOCK_LABEL: dict[str, str] = {bt: label for bt, label, _ in BLOCK_DEFINITIONS}
 _BLOCK_SORT: dict[str, int] = {bt: order for bt, _, order in BLOCK_DEFINITIONS}
 
 _STAGE_TOTAL = 5  # 1:load, 2:classify, 3:question-refine+promote+criticism-filter, 4:toxic-target+ban, 5:persist
+_LOW_VALUE_QUESTION_TYPES = {"attack_ragebait", "meme_one_liner"}
+_AUTO_BAN_CANDIDATE_MIN_CONFIDENCE = 0.80
+
+
+def _dedupe_preserve_order(ids: list[int]) -> list[int]:
+    seen: set[int] = set()
+    result: list[int] = []
+    for cid in ids:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        result.append(cid)
+    return result
 
 
 def _route_toxic_classification(
@@ -60,36 +76,57 @@ def _route_toxic_classification(
 ) -> str:
     """Route a toxic candidate into auto-ban, manual review, or ignore.
 
-    Production policy (enhanced for safety):
+    Production policy:
     - `third_party` is always ignored.
-    - For `author`/`guest`: require manual review if confidence < auto_ban_threshold
-      even for high-confidence cases to avoid false positives on channel stakeholders.
-    - For `content`: auto-ban at threshold (less risky than person-targeted bans).
     - For `undefined`: always manual review.
+    - `author` / `guest` / `content` above the candidate threshold are sent to
+      the final auto-ban precision review.
     - All remaining non-third-party toxic candidates go to manual review so that
-      stage-2 toxic candidates are not silently lost.
+      ambiguous cases are never silently lost before the final precision check.
     """
     if target == "third_party":
         return "ignore"
-    
-    # Enhanced safety: author/guest insults require higher scrutiny
-    # Content-targeted toxicity can be auto-banned with standard threshold
-    if target == "content" and confidence >= auto_ban_threshold:
-        return "auto_ban"
-    
-    # Author/guest toxicity: require manual review below auto_ban_threshold
-    # Even high-confidence cases go through review to prevent false positives
-    if target in {"author", "guest"}:
-        if confidence >= auto_ban_threshold:
-            # High confidence but still sensitive - flag for expedited review
-            return "auto_ban"  # Will be logged and auditable
-        return "manual_review"
-    
-    # Undefined target: always manual review
+    candidate_threshold = min(float(auto_ban_threshold), _AUTO_BAN_CANDIDATE_MIN_CONFIDENCE)
+    if target in {"author", "guest", "content"}:
+        return "auto_ban" if confidence >= candidate_threshold else "manual_review"
     if target == "undefined":
         return "manual_review"
-    
-    return "ignore"
+    return "manual_review"
+
+
+def _partition_constructive_question_candidates(
+    *,
+    question_candidate_ids: list[int],
+    comment_map: dict[int, Comment],
+    refiner_data: dict[int, dict[str, Any]],
+) -> tuple[list[int], list[int]]:
+    """Keep only genuinely constructive questions after the refiner pass."""
+    kept: list[int] = []
+    demoted: list[int] = []
+
+    for cid in _dedupe_preserve_order(question_candidate_ids):
+        meta = refiner_data.get(cid)
+        if not meta:
+            kept.append(cid)
+            continue
+        question_type = str(meta.get("question_type") or "")
+        score = int(meta.get("score") or 0)
+        comment = comment_map.get(cid)
+        text = (comment.text_raw or "") if comment is not None else ""
+
+        if question_type in _LOW_VALUE_QUESTION_TYPES:
+            demoted.append(cid)
+            continue
+        if (
+            question_type == "clarification_needed"
+            and score <= 5
+            and not has_question_signal(text)
+        ):
+            demoted.append(cid)
+            continue
+        kept.append(cid)
+
+    return kept, demoted
 
 
 class AppealAnalyticsService:
@@ -254,26 +291,30 @@ class AppealAnalyticsService:
                     scores[cid] = meta["score"]
 
             # Promote criticism → question if refiner confirms a real question type
-            _LOW_VALUE_Q = {"attack_ragebait", "meme_one_liner"}
             promoted_from_criticism: set[int] = set()
             for cid in criticism_with_q_signal:
                 if cid in refiner_data:
                     q_type = refiner_data[cid].get("question_type", "")
-                    if q_type and q_type not in _LOW_VALUE_Q:
+                    if q_type and q_type not in _LOW_VALUE_QUESTION_TYPES:
                         promoted_from_criticism.add(cid)
 
-            question_ids = question_candidates + [
-                cid for cid in criticism_with_q_signal if cid in promoted_from_criticism
-            ]
-            criticism_after_promotion = [
-                cid for cid in criticism_candidates if cid not in promoted_from_criticism
-            ]
+            question_ids, demoted_question_ids = _partition_constructive_question_candidates(
+                question_candidate_ids=question_candidates
+                + [cid for cid in criticism_with_q_signal if cid in promoted_from_criticism],
+                comment_map=comment_map_full,
+                refiner_data=refiner_data,
+            )
+            criticism_after_promotion = _dedupe_preserve_order(
+                [cid for cid in criticism_candidates if cid not in promoted_from_criticism]
+                + demoted_question_ids
+            )
 
             logger.info(
                 "Question promotion — candidates_total: %d, promoted_from_criticism: %d, "
-                "final_question_count: %d",
+                "demoted_after_refiner: %d, final_question_count: %d",
                 len(question_candidates),
                 len(promoted_from_criticism),
+                len(demoted_question_ids),
                 len(question_ids),
             )
 
@@ -350,15 +391,29 @@ class AppealAnalyticsService:
                     manual_review_ids.append(cid)
 
             logger.info(
-                "Toxic classification complete — total: %d, auto_ban: %d (>= %.2f), "
-                "manual_review: %d (>= %.2f), ignored: %d",
+                "Toxic classification complete — total: %d, auto_ban_candidates: %d "
+                "(candidate threshold=min(%.2f, %.2f)), manual_review: %d (>= %.2f), ignored: %d",
                 len(toxic_classifications),
                 len(auto_ban_ids),
                 auto_ban_threshold,
+                _AUTO_BAN_CANDIDATE_MIN_CONFIDENCE,
                 len(manual_review_ids),
                 manual_review_threshold,
                 len(toxic_classifications) - len(auto_ban_ids) - len(manual_review_ids),
             )
+
+            auto_ban_ids, downgraded_auto_ban_ids = self._apply_toxic_autoban_precision_review(
+                auto_ban_ids=auto_ban_ids,
+                comment_map_full=comment_map_full,
+                toxic_metadata=toxic_metadata,
+                llm_provider=llm_provider,
+                author_name=author_name,
+                guest_names=guest_names,
+            )
+            if downgraded_auto_ban_ids:
+                manual_review_ids = list(
+                    dict.fromkeys(manual_review_ids + downgraded_auto_ban_ids)
+                )
 
             # Execute auto-bans
             ban_service = YouTubeBanService(self.settings, self.db)
@@ -470,6 +525,66 @@ class AppealAnalyticsService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _apply_toxic_autoban_precision_review(
+        self,
+        *,
+        auto_ban_ids: list[int],
+        comment_map_full: dict[int, Comment],
+        toxic_metadata: dict[int, dict[str, Any]],
+        llm_provider: LLMProvider,
+        author_name: str,
+        guest_names: list[str],
+    ) -> tuple[list[int], list[int]]:
+        """Run a high-precision review for auto-ban candidates.
+
+        Any rejected auto-ban candidate is downgraded to manual review instead of being dropped.
+        """
+        if (
+            not auto_ban_ids
+            or not self.settings.toxic_autoban_precision_review_enabled
+        ):
+            return auto_ban_ids, []
+
+        candidate_comments = [
+            comment_map_full[cid] for cid in auto_ban_ids if cid in comment_map_full
+        ]
+        if not candidate_comments:
+            return auto_ban_ids, []
+
+        confirmed = verify_auto_ban_candidates(
+            candidate_comments,
+            author_name=author_name,
+            guest_names=guest_names,
+            toxic_metadata=toxic_metadata,
+            llm_provider=llm_provider,
+            request_llm_json=self._request_llm_json,
+            confidence_threshold=self.settings.toxic_autoban_precision_review_threshold,
+        )
+        confirmed_set = set(confirmed)
+        ordered_auto_ban_ids = _dedupe_preserve_order(auto_ban_ids)
+        downgraded_ids = [cid for cid in ordered_auto_ban_ids if cid not in confirmed_set]
+
+        for cid in ordered_auto_ban_ids:
+            metadata = toxic_metadata.setdefault(cid, {})
+            metadata["precision_review_threshold"] = (
+                self.settings.toxic_autoban_precision_review_threshold
+            )
+            metadata["precision_review_status"] = (
+                "confirmed_auto_ban" if cid in confirmed_set else "downgraded_to_manual_review"
+            )
+            if cid in confirmed:
+                metadata["precision_review_confidence"] = confirmed[cid]["confidence"]
+                metadata["precision_review_target"] = confirmed[cid]["target_confirmed"]
+
+        if downgraded_ids:
+            logger.info(
+                "Precision toxic review downgraded %d/%d auto-ban candidates to manual review.",
+                len(downgraded_ids),
+                len(ordered_auto_ban_ids),
+            )
+
+        return [cid for cid in ordered_auto_ban_ids if cid in confirmed_set], downgraded_ids
 
     def _set_stage(self, run: AppealRun, current: int, label: str) -> None:
         meta = dict(run.meta_json) if isinstance(run.meta_json, dict) else {}

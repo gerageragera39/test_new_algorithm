@@ -66,7 +66,7 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 def _normalize_matrix(matrix: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
-    return matrix / norms
+    return np.asarray(matrix / norms, dtype=np.float32)
 
 
 class ClusteringService:
@@ -427,7 +427,7 @@ class ClusteringService:
         scores = [_cosine_similarity(vec, centroid) for vec in group_matrix]
         if not scores:
             return 0.0
-        return float(max(0.0, min(1.0, np.mean(scores))))
+        return float(np.clip(np.mean(scores), 0.0, 1.0))
 
     def _fit_predict_adaptive(self, matrix: np.ndarray) -> _FitResult:
         total_count = int(matrix.shape[0])
@@ -470,10 +470,7 @@ class ClusteringService:
             coverage_score = 1.0 - noise_ratio
             
             # Quality score (silhouette, but penalize negative values more)
-            if silhouette >= 0:
-                quality_score = silhouette
-            else:
-                quality_score = silhouette * 2.0  # Double penalty for negative silhouette
+            quality_score = silhouette if silhouette >= 0 else silhouette * 2.0
                 
             # Cluster count preference (prefer closer to expected)
             cluster_count_score = 1.0 - min(1.0, cluster_distance_penalty * 0.8)
@@ -631,10 +628,7 @@ class ClusteringService:
             }
             
             # More conservative epsilon values for better cluster separation
-            if total_count < 150:
-                epsilon_values = (0.0, 0.02)
-            else:
-                epsilon_values = (0.0, 0.015, 0.03)
+            epsilon_values = (0.0, 0.02) if total_count < 150 else (0.0, 0.015, 0.03)
                 
             for min_samples in sorted(min_samples_values):
                 for epsilon in epsilon_values:
@@ -780,7 +774,12 @@ class ClusteringService:
 
         result: list[ClusterDraft] = []
         for cluster in clusters:
-            if cluster.share_pct < min_share or cluster.size_count < 12:
+            if (
+                cluster.share_pct < min_share
+                or cluster.size_count < 12
+                or cluster.is_emerging
+                or cluster.cluster_key.startswith("emerging_")
+            ):
                 result.append(cluster)
                 continue
 
@@ -816,6 +815,20 @@ class ClusteringService:
                 result.append(cluster)
                 continue
 
+            if not self._passes_large_cluster_split_quality_gate(
+                cluster=cluster,
+                valid_groups=valid_groups,
+                matrix=matrix,
+            ):
+                self.logger.info(
+                    "Large cluster split quality gate rejected %s (size=%s share=%.1f%%).",
+                    cluster.cluster_key,
+                    cluster.size_count,
+                    cluster.share_pct,
+                )
+                result.append(cluster)
+                continue
+
             valid_groups.sort(key=len, reverse=True)
             for sub_idx, sub_members in enumerate(valid_groups):
                 result.append(
@@ -838,6 +851,94 @@ class ClusteringService:
             )
 
         return result
+
+    def _passes_large_cluster_split_quality_gate(
+        self,
+        *,
+        cluster: ClusterDraft,
+        valid_groups: list[list[int]],
+        matrix: np.ndarray,
+    ) -> bool:
+        """Accept a second split only when it clearly improves a mixed large cluster.
+
+        Large topical clusters are often valid and later pipeline stages already
+        know how to extract positions and representative comments inside them.
+        Therefore we should only split when the parent cluster is genuinely
+        heterogeneous and the candidate subgroups are meaningfully cleaner.
+        """
+        if not self._passes_noise_split_quality_gate(valid_groups=valid_groups, matrix=matrix):
+            return False
+
+        parent_size = max(1, len(cluster.member_indices))
+        parent_coherence = self._group_coherence(
+            members=cluster.member_indices,
+            matrix=matrix,
+        )
+        parent_confidence = float(cluster.assignment_confidence)
+        parent_ambiguous_share = float(cluster.ambiguous_share_pct)
+        parent_limit = float(self.settings.cluster_large_split_min_parent_coherence)
+
+        # Preserve already coherent dominant topics instead of forcing a second
+        # KMeans split that tends to over-fragment them.
+        if (
+            parent_coherence >= max(parent_limit, float(self.settings.topic_coherence_min) + 0.12)
+            and parent_confidence >= 0.78
+            and parent_ambiguous_share <= 30.0
+        ):
+            return False
+
+        child_sizes = [len(group) for group in valid_groups]
+        if not child_sizes:
+            return False
+        largest_child_share = max(child_sizes) / parent_size
+
+        child_coherences = [
+            self._group_coherence(members=group, matrix=matrix) for group in valid_groups
+        ]
+        weighted_child_coherence = float(
+            sum(
+                len(group) * coherence
+                for group, coherence in zip(valid_groups, child_coherences, strict=False)
+            )
+            / parent_size
+        )
+        min_child_coherence = min(child_coherences) if child_coherences else 0.0
+        coherence_gain = weighted_child_coherence - parent_coherence
+        min_gain = float(self.settings.cluster_large_split_min_coherence_gain)
+
+        # Reject splits where one dominant subgroup would keep almost the entire
+        # parent cluster, because that usually means KMeans is carving a healthy
+        # topic into arbitrary slices.
+        dominant_limit = float(self.settings.cluster_large_split_max_dominant_share_pct) / 100.0
+        if largest_child_share >= dominant_limit:
+            return False
+        if largest_child_share > 0.8 and coherence_gain < max(0.08, min_gain + 0.01):
+            return False
+
+        centroids = []
+        for group in valid_groups:
+            centroid = matrix[group].mean(axis=0)
+            centroids.append(centroid)
+        max_centroid_similarity = 0.0
+        for left_idx in range(len(centroids)):
+            for right_idx in range(left_idx + 1, len(centroids)):
+                max_centroid_similarity = max(
+                    max_centroid_similarity,
+                    _cosine_similarity(centroids[left_idx], centroids[right_idx]),
+                )
+
+        if parent_coherence >= parent_limit and coherence_gain < max(min_gain + 0.01, 0.07):
+            return False
+        if max_centroid_similarity > 0.92 and coherence_gain < max(min_gain + 0.01, 0.08):
+            return False
+        if coherence_gain >= min_gain and min_child_coherence >= max(0.34, parent_coherence + 0.02):
+            return True
+        return (
+            parent_coherence < max(parent_limit, float(self.settings.topic_coherence_min))
+            and parent_ambiguous_share >= 35.0
+            and coherence_gain >= 0.03
+            and max_centroid_similarity <= 0.9
+        )
 
     def _enforce_cluster_limit(
         self,

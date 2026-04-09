@@ -12,6 +12,24 @@ export interface RunResponse {
   message: string;
 }
 
+export interface QueueJobResponse {
+  id: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+  result: Record<string, unknown> | null;
+}
+
+export interface QueueSnapshotResponse {
+  current: QueueJobResponse | null;
+  queued: QueueJobResponse[];
+  recent: QueueJobResponse[];
+}
+
 /** Summary information for a single video returned by the videos list endpoint. */
 export interface VideoItemResponse {
   youtube_video_id: string;
@@ -186,6 +204,35 @@ export interface RuntimeSettingsResponse {
   openai_enable_polish_call: boolean;
 }
 
+export interface SetupStatusResponse {
+  is_configured: boolean;
+  has_openai_api_key: boolean;
+  has_youtube_api_key: boolean;
+  has_playlist_id: boolean;
+  has_youtube_oauth_client_id: boolean;
+  has_youtube_oauth_client_secret: boolean;
+  has_youtube_oauth_refresh_token: boolean;
+  runtime_env_path: string;
+}
+
+export interface SetupRequest {
+  openai_api_key: string;
+  youtube_api_key: string;
+  youtube_playlist_id?: string;
+  youtube_oauth_client_id?: string;
+  youtube_oauth_client_secret?: string;
+  youtube_oauth_refresh_token?: string;
+}
+
+export interface SetupUpdateRequest {
+  openai_api_key?: string;
+  youtube_api_key?: string;
+  youtube_playlist_id?: string;
+  youtube_oauth_client_id?: string;
+  youtube_oauth_client_secret?: string;
+  youtube_oauth_refresh_token?: string;
+}
+
 /** Partial update payload for runtime settings (all fields optional). */
 export type RuntimeSettingsUpdateRequest = Partial<
   Omit<RuntimeSettingsResponse, "updated_at">
@@ -207,11 +254,16 @@ export interface AppealBlockItem {
   author_name: string | null;
   text: string;
   score: number | null;
+  author_channel_id?: string | null;
 }
 
 /** Group of comments from the same author. */
 export interface AppealAuthorGroup {
   author_name: string;
+  author_channel_id: string | null;
+  banned_user_id: number | null;
+  is_banned_active: boolean;
+  youtube_banned: boolean;
   comment_count: number;
   comments: AppealBlockItem[];
 }
@@ -267,6 +319,13 @@ export interface BanUserResponse {
   youtube_banned: boolean;
   youtube_error: string | null;
   csv_saved: boolean;
+}
+
+export interface UnbanUserResponse {
+  status: string;
+  banned_user_id: number | null;
+  youtube_unbanned: boolean;
+  youtube_error: string | null;
 }
 
 /** Response with video guests list. */

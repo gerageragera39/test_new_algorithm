@@ -39,3 +39,14 @@ def test_settings_accept_supported_openai_chat_model_alias() -> None:
 def test_settings_accept_supported_openai_chat_model_gpt_5_4_alias() -> None:
     settings = Settings(openai_chat_model="gpt-5.4-mini-2026-04-01")
     assert settings.openai_chat_model == "gpt-5.4-mini-2026-04-01"
+
+
+def test_settings_normalize_confidence_thresholds_from_percentage_values() -> None:
+    settings = Settings(
+        auto_ban_threshold=80,
+        manual_review_threshold=50,
+        toxic_autoban_precision_review_threshold=85,
+    )
+    assert settings.auto_ban_threshold == pytest.approx(0.8)
+    assert settings.manual_review_threshold == pytest.approx(0.5)
+    assert settings.toxic_autoban_precision_review_threshold == pytest.approx(0.85)

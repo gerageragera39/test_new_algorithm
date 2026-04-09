@@ -51,6 +51,17 @@ Optional run option for both endpoints:
 | `POST` | `/appeal/run` | `RunResponse` | Latest video when URL omitted; `?sync=true` supported |
 | `GET` | `/appeal/{video_id}` | `AppealAnalyticsResponse` | Returns latest completed appeal run for that video |
 | `GET` | `/appeal/{video_id}/author/{author_name}` | `AuthorCommentsResponse` | Returns all comments by the specified author |
+| `GET` | `/appeal/{video_id}/toxic-review` | `ToxicReviewResponse` | Manual-review queue, excludes users with active bans |
+| `POST` | `/appeal/ban-user` | `BanUserResponse` | Manual ban from the admin UI |
+| `POST` | `/appeal/unban-user` | `UnbanUserResponse` | Marks a ban inactive and attempts best-effort YouTube restore |
+
+## Desktop setup
+
+| Method | Path | Response | Notes |
+|---|---|---|---|
+| `GET` | `/app/setup/status` | `SetupStatusResponse` | Returns first-run status including optional OAuth fields |
+| `POST` | `/app/setup` | `SetupStatusResponse` | Saves initial desktop secrets |
+| `PUT` | `/app/setup` | `SetupStatusResponse` | Rotates stored secrets / OAuth values from Dashboard |
 
 ## Runtime and Budget
 
@@ -65,7 +76,7 @@ Optional run option for both endpoints:
 | Method | Path | Behavior |
 |---|---|---|
 | `GET` | `/` | Redirects to `/ui` |
-| `GET` | `/ui` and `/ui/{path}` | Serves `frontend/dist/index.html` (SPA shell) |
+| `GET` | `/ui` and `/ui/{path}` | Serves `frontend/dist/index.html` from desktop resource root (SPA shell) |
 
 If frontend build is missing, UI routes return `503` with build instructions.
 

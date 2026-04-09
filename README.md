@@ -252,7 +252,7 @@ flowchart LR
 | `constructive_question` | creator-directed questions |
 | `constructive_criticism` | criticism backed by an actual political argument |
 | `author_appeal` | direct requests / appeals to the creator |
-| `toxic_auto_banned` | high-confidence toxic comments sent to automatic moderation |
+| `toxic_auto_banned` | toxic comments that passed final verification and were auto-moderated |
 | `toxic_manual_review` | toxic comments queued for admin review |
 
 `skip` is still used internally as a classification outcome, but it is **not persisted as a block**.
@@ -260,8 +260,11 @@ flowchart LR
 ### Pipeline behaviors that matter
 - question candidates get a **second-pass refiner**;
 - criticism with question signal can be promoted into the question block;
+- low-value `attack_ragebait` / `meme_one_liner` question candidates are demoted out of `constructive_question`;
 - toxic comments are classified by **target** (`author`, `guest`, `content`, `undefined`, `third_party`);
 - routing splits comments into **auto-ban**, **manual review**, or **ignore**;
+- comments with toxicity confidence **>= 0.80** enter the auto-ban path, but a final strict verification pass can still downgrade them into manual review;
+- auto-banned authors can be **unbanned from the UI** if the operator spots a false positive;
 - per-video guest names can improve targeting accuracy.
 
 ---
@@ -291,6 +294,7 @@ Interactive docs live at **`/docs`** when the backend is running.
 | `GET` | `/appeal/{video_id}/author/{author_name}` | all comments by one author |
 | `GET` | `/appeal/{video_id}/toxic-review` | manual toxic-review queue |
 | `POST` | `/appeal/ban-user` | manual ban action |
+| `POST` | `/appeal/unban-user` | restore a previously banned commenter |
 
 ### Runtime and settings
 | Method | Endpoint | Purpose |
@@ -300,6 +304,9 @@ Interactive docs live at **`/docs`** when the backend is running.
 | `GET` | `/budget` | OpenAI usage snapshot |
 | `GET` | `/settings/runtime` | current mutable runtime settings |
 | `PUT` | `/settings/runtime` | update mutable runtime settings |
+| `GET` | `/app/setup/status` | desktop-only first-run setup status |
+| `POST` | `/app/setup` | desktop-only save desktop bootstrap secrets |
+| `PUT` | `/app/setup` | desktop-only rotate desktop bootstrap secrets / OAuth values |
 
 For request examples, see [`requests.md`](./requests.md).
 
@@ -370,6 +377,9 @@ Primary configuration surfaces:
 | `YOUTUBE_API_KEY` | YouTube Data API access |
 | `YOUTUBE_PLAYLIST_ID` | latest-video runs |
 | `OPENAI_API_KEY` | classification, labeling, moderation |
+| `YOUTUBE_OAUTH_CLIENT_ID` | optional YouTube moderation / restore actions |
+| `YOUTUBE_OAUTH_CLIENT_SECRET` | optional YouTube moderation / restore actions |
+| `YOUTUBE_OAUTH_REFRESH_TOKEN` | optional YouTube moderation / restore actions |
 | `DATABASE_URL` | PostgreSQL persistence |
 | `CELERY_BROKER_URL` | Redis broker |
 | `CELERY_RESULT_BACKEND` | Redis result storage |

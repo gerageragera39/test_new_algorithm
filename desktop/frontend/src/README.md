@@ -28,7 +28,7 @@ src/
 
 | File | Purpose |
 |---|---|
-| `components/AppShell.tsx` | application shell and navigation |
+| `components/AppShell.tsx` | application shell, navigation, and first-run setup form |
 | `components/StatusPill.tsx` | status badge for runs and pipeline states |
 | `components/ToxicReviewPanel.tsx` | toxic-review queue and moderation actions |
 
@@ -39,8 +39,8 @@ src/
 | `pages/DashboardPage.tsx` | run controls, health, latest report snapshot, guest-name input |
 | `pages/VideosPage.tsx` | video list and progress tracking |
 | `pages/ReportPage.tsx` | report details with topic positions and comments |
-| `pages/AppealPage.tsx` | appeal blocks, toxic review, manual ban workflow |
-| `pages/BudgetPage.tsx` | runtime settings and budget usage |
+| `pages/AppealPage.tsx` | appeal blocks, toxic review, manual ban + unban workflow |
+| `pages/BudgetPage.tsx` | runtime settings, OAuth/playlist editing, and budget usage |
 | `pages/NotFoundPage.tsx` | 404 screen |
 
 ## API layer

@@ -1,12 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { getBudget, getRuntimeSettings, updateRuntimeSettings } from "../lib/api";
+import {
+  getBudget,
+  getRuntimeSettings,
+  getSetupStatus,
+  updateRuntimeSettings,
+  updateSetup,
+} from "../lib/api";
 import { formatDateTime, formatMoney } from "../lib/format";
 import type {
   BudgetEntry,
   BudgetUsageResponse,
   RuntimeSettingsResponse,
-  RuntimeSettingsUpdateRequest
+  RuntimeSettingsUpdateRequest,
+  SetupStatusResponse,
+  SetupUpdateRequest,
 } from "../types/api";
 
 /** Local form state for runtime settings. */
@@ -21,6 +29,13 @@ interface RuntimeFormState {
   max_comments_per_video: number;
   youtube_include_replies: boolean;
   openai_enable_polish_call: boolean;
+}
+
+interface SetupFormState {
+  youtube_playlist_id: string;
+  youtube_oauth_client_id: string;
+  youtube_oauth_client_secret: string;
+  youtube_oauth_refresh_token: string;
 }
 
 interface AggregatedSpendRow {
@@ -125,6 +140,15 @@ function toFormState(state: RuntimeSettingsResponse): RuntimeFormState {
   };
 }
 
+function emptySetupForm(): SetupFormState {
+  return {
+    youtube_playlist_id: "",
+    youtube_oauth_client_id: "",
+    youtube_oauth_client_secret: "",
+    youtube_oauth_refresh_token: "",
+  };
+}
+
 /**
  * Budget and runtime settings page. Shows OpenAI spend summary,
  * daily call log table, and editable scheduler controls.
@@ -132,9 +156,12 @@ function toFormState(state: RuntimeSettingsResponse): RuntimeFormState {
 export function BudgetPage() {
   const [snapshot, setSnapshot] = useState<BudgetUsageResponse | null>(null);
   const [runtime, setRuntime] = useState<RuntimeSettingsResponse | null>(null);
+  const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(null);
   const [formState, setFormState] = useState<RuntimeFormState | null>(null);
+  const [setupForm, setSetupForm] = useState<SetupFormState>(emptySetupForm);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSavingSetup, setIsSavingSetup] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
@@ -198,9 +225,17 @@ export function BudgetPage() {
     async function load() {
       try {
         const [budgetData, runtimeData] = await Promise.all([getBudget(), getRuntimeSettings()]);
+        let setupData: SetupStatusResponse | null = null;
+        try {
+          setupData = await getSetupStatus();
+        } catch {
+          // `/app/setup/*` endpoints exist only in desktop runtime.
+          setupData = null;
+        }
         if (isMounted) {
           setSnapshot(budgetData);
           setRuntime(runtimeData);
+          setSetupStatus(setupData);
           setFormState(toFormState(runtimeData));
           setError(null);
         }
@@ -256,8 +291,40 @@ export function BudgetPage() {
     }
   }
 
+  async function handleSaveSetupSecrets() {
+    const payload: SetupUpdateRequest = {
+      youtube_playlist_id: setupForm.youtube_playlist_id.trim() || undefined,
+      youtube_oauth_client_id: setupForm.youtube_oauth_client_id.trim() || undefined,
+      youtube_oauth_client_secret: setupForm.youtube_oauth_client_secret.trim() || undefined,
+      youtube_oauth_refresh_token: setupForm.youtube_oauth_refresh_token.trim() || undefined,
+    };
+    if (Object.values(payload).every((value) => value == null || value === "")) {
+      setSaveMessage("Нет новых OAuth/playlist значений для сохранения.");
+      return;
+    }
+
+    setIsSavingSetup(true);
+    setError(null);
+    setSaveMessage(null);
+    try {
+      const updated = await updateSetup(payload);
+      setSetupStatus(updated);
+      setSetupForm(emptySetupForm());
+      setSaveMessage("OAuth/playlist параметры сохранены.");
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : "Ошибка сохранения OAuth";
+      setError(message);
+    } finally {
+      setIsSavingSetup(false);
+    }
+  }
+
   function updateForm(patch: Partial<RuntimeFormState>) {
     setFormState((prev) => (prev ? { ...prev, ...patch } : prev));
+  }
+
+  function updateSetupForm(patch: Partial<SetupFormState>) {
+    setSetupForm((prev) => ({ ...prev, ...patch }));
   }
 
   return (
@@ -397,6 +464,91 @@ export function BudgetPage() {
           <p className="muted mt">Последнее обновление: {formatDateTime(runtime.updated_at)}</p>
         ) : null}
       </section>
+
+      {setupStatus ? (
+      <section className="card">
+        <div className="section-head compact">
+          <div>
+            <p className="eyebrow">YouTube Moderation OAuth</p>
+            <h2>Desktop secrets и moderation credentials</h2>
+          </div>
+        </div>
+
+        <p className="muted">
+          Эти поля не обязательны. Но если они заполнены, desktop-приложение сможет
+          делать channel-level ban/unban через YouTube OAuth.
+        </p>
+
+        <div className="settings-grid">
+          <label className="settings-field">
+            <span>YOUTUBE_PLAYLIST_ID</span>
+            <input
+              type="text"
+              value={setupForm.youtube_playlist_id}
+              onChange={(event) => updateSetupForm({ youtube_playlist_id: event.target.value })}
+              placeholder={setupStatus?.has_playlist_id ? "Уже сохранён" : "PL..."}
+            />
+          </label>
+
+          <label className="settings-field">
+            <span>YOUTUBE_OAUTH_CLIENT_ID</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={setupForm.youtube_oauth_client_id}
+              onChange={(event) =>
+                updateSetupForm({ youtube_oauth_client_id: event.target.value })
+              }
+              placeholder={
+                setupStatus?.has_youtube_oauth_client_id ? "Уже сохранён" : "Необязательно"
+              }
+            />
+          </label>
+
+          <label className="settings-field">
+            <span>YOUTUBE_OAUTH_CLIENT_SECRET</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={setupForm.youtube_oauth_client_secret}
+              onChange={(event) =>
+                updateSetupForm({ youtube_oauth_client_secret: event.target.value })
+              }
+              placeholder={
+                setupStatus?.has_youtube_oauth_client_secret ? "Уже сохранён" : "Необязательно"
+              }
+            />
+          </label>
+
+          <label className="settings-field">
+            <span>YOUTUBE_OAUTH_REFRESH_TOKEN</span>
+            <textarea
+              value={setupForm.youtube_oauth_refresh_token}
+              onChange={(event) =>
+                updateSetupForm({ youtube_oauth_refresh_token: event.target.value })
+              }
+              placeholder={
+                setupStatus?.has_youtube_oauth_refresh_token
+                  ? "Уже сохранён"
+                  : "Необязательно"
+              }
+              rows={4}
+            />
+          </label>
+        </div>
+
+        <div className="actions-row">
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={handleSaveSetupSecrets}
+            disabled={isSavingSetup}
+          >
+            {isSavingSetup ? "Сохранение..." : "Сохранить OAuth / playlist"}
+          </button>
+        </div>
+      </section>
+      ) : null}
 
       {snapshot ? (
         <section className="card accent">

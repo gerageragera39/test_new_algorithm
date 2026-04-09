@@ -112,7 +112,8 @@ def test_local_embedding_provider_uses_instruction_prefix_for_instruction_models
 
 
 def test_bge_provider_uses_plain_cache_namespace_when_instruction_mode_off(test_settings) -> None:
-    provider = LocalSentenceTransformerProvider("BAAI/bge-m3", test_settings)
+    settings = test_settings.model_copy(update={"embedding_instruction_mode": "off"})
+    provider = LocalSentenceTransformerProvider("BAAI/bge-m3", settings)
 
     assert provider.cache_namespace(task="topic") == "topic-plain"
 

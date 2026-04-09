@@ -228,3 +228,50 @@ def test_ban_via_youtube_api_retries_once_after_401(
     assert success is True
     assert error is None
     assert calls == ["Bearer token-1", "Bearer token-2"]
+
+
+def test_unban_route_marks_ban_inactive_and_keeps_audit_record(db_session, test_settings) -> None:
+    from app.api.routes import unban_user
+    from app.db.models import BannedUser
+    from app.schemas.api import UnbanUserRequest
+
+    video = _make_video(youtube_video_id="video-unban")
+    db_session.add(video)
+    db_session.flush()
+
+    comment = _make_comment(
+        video_id=video.id,
+        youtube_comment_id="comment-unban",
+        author_name="Needs Restore",
+        author_channel_id="UC_RESTORE",
+    )
+    db_session.add(comment)
+    db_session.flush()
+
+    banned_user = BannedUser(
+        video_id=video.id,
+        comment_id=comment.id,
+        username=comment.author_name or "unknown",
+        author_channel_id=comment.author_channel_id,
+        ban_reason="auto ban",
+        confidence_score=0.91,
+        insult_target="author",
+        banned_at=datetime(2026, 1, 1, tzinfo=UTC),
+        youtube_banned=False,
+        banned_by_admin=False,
+    )
+    db_session.add(banned_user)
+    db_session.commit()
+
+    response = unban_user(
+        request=UnbanUserRequest(banned_user_id=banned_user.id),
+        db=db_session,
+        settings=test_settings,
+    )
+
+    assert response.status == "unbanned"
+    assert response.youtube_unbanned is False
+    restored = db_session.get(BannedUser, banned_user.id)
+    assert restored is not None
+    assert restored.unbanned_at is not None
+    assert restored.unbanned_by_admin is True

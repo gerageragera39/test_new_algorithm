@@ -74,6 +74,11 @@ _REQUEST_RE = re.compile(
     r"пожалуйста|можно ли|хотелось бы|было бы|предлагаю|прошу|попрос)\b",
     re.IGNORECASE,
 )
+_DIRECTIVE_REQUEST_RE = re.compile(
+    r"^\s*(сними(?:те)?|расскажи(?:те)?|сделай(?:те)?|пригласи(?:те)?|"
+    r"рассмотри(?:те)?|разбери(?:те)?|прокомментируй(?:те)?)\b",
+    re.IGNORECASE,
+)
 
 _BATCH_SIZE = 30  # Slightly smaller batches for the richer prompt
 
@@ -382,10 +387,10 @@ def classify_unified_llm(
                 # Re-evaluate with heuristic to catch valuable content LLM might have missed
                 cid = batch_id_map.get(num)
                 if cid is not None:
-                    comment = next((c for c in batch if c.id == cid), None)
-                    if comment:
+                    matched_comment = next((c for c in batch if c.id == cid), None)
+                    if matched_comment is not None:
                         heuristic_cat = _classify_heuristic_single(
-                            comment, author_name, guest_names
+                            matched_comment, author_name, guest_names
                         )
                         if heuristic_cat != "skip":
                             # Heuristic found value - use it instead
@@ -493,35 +498,32 @@ def _classify_heuristic_single(
     has_author_ref = has_name_ref or has_author_word
     has_guest_ref = any(pattern.search(text) for pattern in guest_res)
     has_content_ref = bool(content_re.search(text))
+    is_channel_addressed = has_author_ref or has_guest_ref or has_content_ref
     
     has_offensive = _has_offensive_language(text)
-    has_question = bool(_QUESTION_RE.search(text))
+    has_question = has_question_signal(text)
     has_criticism_signal = bool(_CRITICISM_SIGNAL_RE.search(text))
     has_gratitude = bool(_GRATITUDE_RE.search(text))
     has_request = bool(_REQUEST_RE.search(text))
+    looks_like_directive_request = bool(_DIRECTIVE_REQUEST_RE.search(text))
     
     # Toxic if offensive + directed at author/guest/content
-    if has_offensive and (has_author_ref or has_guest_ref or has_content_ref):
+    if has_offensive and is_channel_addressed:
         return "toxic"
     
-    # Not directed at author → skip
-    if not has_author_ref:
-        return "skip"
-    
-    # Offensive + author-directed = toxic
-    if has_offensive:
+    if has_offensive and has_author_ref:
         return "toxic"
     
     # Question priority over criticism
-    if has_question and len(text.split()) >= 4:
+    if has_question and len(text.split()) >= 4 and is_channel_addressed:
         return "question"
     
     # Criticism signal
-    if has_criticism_signal and len(text.split()) >= 5:
+    if has_criticism_signal and len(text.split()) >= 5 and is_channel_addressed:
         return "criticism"
     
     # Appeal/request
-    if has_request and not has_gratitude:
+    if has_request and not has_gratitude and (is_channel_addressed or looks_like_directive_request):
         return "appeal"
     
     # Default: skip (gratitude or no clear signal)
@@ -557,28 +559,29 @@ def _classify_batch_heuristic(
         has_author_ref = has_name_ref or has_author_word
         has_guest_ref = any(pattern.search(text) for pattern in guest_res)
         has_content_ref = bool(content_re.search(text))
+        is_channel_addressed = has_author_ref or has_guest_ref or has_content_ref
 
         has_offensive = _has_offensive_language(text)
-        has_question = bool(_QUESTION_RE.search(text))
+        has_question = has_question_signal(text)
         has_criticism_signal = bool(_CRITICISM_SIGNAL_RE.search(text))
         has_gratitude = bool(_GRATITUDE_RE.search(text))
         has_request = bool(_REQUEST_RE.search(text))
+        looks_like_directive_request = bool(_DIRECTIVE_REQUEST_RE.search(text))
 
-        if has_offensive and (has_author_ref or has_guest_ref or has_content_ref):
+        if has_offensive and is_channel_addressed:
             result["toxic"].append(comment.id)
             continue
 
-        if not has_author_ref:
-            continue
-
-        if has_offensive:
+        if has_offensive and has_author_ref:
             result["toxic"].append(comment.id)
-        elif has_question and len(text.split()) >= 4:
+        elif has_question and len(text.split()) >= 4 and is_channel_addressed:
             # Question priority over criticism (question > criticism)
             result["question"].append(comment.id)
-        elif has_criticism_signal and len(text.split()) >= 5:
+        elif has_criticism_signal and len(text.split()) >= 5 and is_channel_addressed:
             result["criticism"].append(comment.id)
-        elif has_request and not has_gratitude:
+        elif has_request and not has_gratitude and (
+            is_channel_addressed or looks_like_directive_request
+        ):
             result["appeal"].append(comment.id)
         # Gratitude without request → skip (not added to any category)
 

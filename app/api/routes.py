@@ -24,6 +24,7 @@ from app.db.models import (
     AppealBlock,
     AppealBlockItem,
     AppealRun,
+    BannedUser,
     Cluster,
     ClusterItem,
     Comment,
@@ -49,6 +50,8 @@ from app.schemas.api import (
     RuntimeSettingsUpdateRequest,
     ToxicReviewItemResponse,
     ToxicReviewResponse,
+    UnbanUserRequest,
+    UnbanUserResponse,
     UpdateVideoGuestsRequest,
     VideoDetailResponse,
     VideoGuestsResponse,
@@ -881,12 +884,32 @@ def get_appeal_analytics(
         if block_ids
         else []
     )
+    block_by_id = {block.id: block for block in blocks_db}
     all_comment_ids = [item.comment_id for item in all_items_db]
     comments_map: dict[int, Comment] = (
         {c.id: c for c in db.scalars(select(Comment).where(Comment.id.in_(all_comment_ids)))}
         if all_comment_ids
         else {}
     )
+    auto_ban_comment_ids = [
+        item.comment_id
+        for item in all_items_db
+        if block_by_id.get(item.block_id) is not None
+        and block_by_id[item.block_id].block_type == "toxic_auto_banned"
+    ]
+    banned_by_comment_id: dict[int, BannedUser] = {}
+    if auto_ban_comment_ids:
+        banned_rows = list(
+            db.scalars(
+                select(BannedUser)
+                .where(BannedUser.comment_id.in_(auto_ban_comment_ids))
+                .where(BannedUser.unbanned_at.is_(None))
+                .order_by(BannedUser.banned_at.desc())
+            )
+        )
+        for banned_row in banned_rows:
+            if banned_row.comment_id is not None:
+                banned_by_comment_id.setdefault(banned_row.comment_id, banned_row)
     items_by_block: dict[int, list[AppealBlockItem]] = {}
     for item in all_items_db:
         items_by_block.setdefault(item.block_id, []).append(item)
@@ -910,6 +933,7 @@ def get_appeal_analytics(
                     author_name=item.author_name,
                     text=_normalize_comment_text(comment.text_raw if comment else ""),
                     score=score,
+                    author_channel_id=comment.author_channel_id if comment else None,
                 )
             )
 
@@ -920,16 +944,32 @@ def get_appeal_analytics(
         # Group by author for toxic block
         if block_db.block_type == "toxic_auto_banned":
             by_author: dict[str, list[AppealBlockItemResponse]] = {}
+            author_meta: dict[str, dict[str, Any]] = {}
             for item in api_items:
                 name = item.author_name or "Unknown"
-                by_author.setdefault(name, []).append(item)
+                comment = comments_map.get(item.comment_id)
+                group_key = comment.author_channel_id or f"name:{name}"
+                by_author.setdefault(group_key, []).append(item)
+                if group_key not in author_meta:
+                    banned_user = banned_by_comment_id.get(item.comment_id)
+                    author_meta[group_key] = {
+                        "author_name": name,
+                        "author_channel_id": comment.author_channel_id if comment else None,
+                        "banned_user_id": banned_user.id if banned_user else None,
+                        "youtube_banned": bool(banned_user.youtube_banned) if banned_user else False,
+                    }
             authors = [
                 AppealAuthorGroup(
-                    author_name=name,
+                    author_name=meta["author_name"],
+                    author_channel_id=meta["author_channel_id"],
+                    banned_user_id=meta["banned_user_id"],
+                    is_banned_active=meta["banned_user_id"] is not None,
+                    youtube_banned=meta["youtube_banned"],
                     comment_count=len(items),
                     comments=items,
                 )
-                for name, items in sorted(by_author.items(), key=lambda x: -len(x[1]))
+                for key, items in sorted(by_author.items(), key=lambda x: -len(x[1]))
+                for meta in [author_meta[key]]
             ]
             blocks.append(
                 AppealBlockResponse(
@@ -1037,19 +1077,21 @@ def get_toxic_review(
 
     # Get all items in this block with their comments
     # Exclude already banned users from review (prefer channel_id, fallback to username)
-    from app.db.models import BannedUser
-
     banned_channel_ids = set(
         db.scalars(
             select(BannedUser.author_channel_id)
             .where(BannedUser.author_channel_id.isnot(None))
+            .where(BannedUser.unbanned_at.is_(None))
             .distinct()
         )
     )
 
     banned_fallback_usernames = set(
         db.scalars(
-            select(BannedUser.username).where(BannedUser.author_channel_id.is_(None)).distinct()
+            select(BannedUser.username)
+            .where(BannedUser.author_channel_id.is_(None))
+            .where(BannedUser.unbanned_at.is_(None))
+            .distinct()
         )
     )
 
@@ -1145,6 +1187,40 @@ def ban_user(
     )
 
 
+@api_router.post("/appeal/unban-user", response_model=UnbanUserResponse)
+def unban_user(
+    request: UnbanUserRequest,
+    db: Session = Depends(get_db_dep),
+    settings: Settings = Depends(get_settings_dep),
+) -> UnbanUserResponse:
+    """Lift a previously recorded ban and restore local access."""
+    ban_service = YouTubeBanService(settings, db)
+    result = ban_service.unban_user(
+        banned_user_id=request.banned_user_id,
+        unban_reason=request.unban_reason or "Разбанен админом",
+        unbanned_by_admin=True,
+    )
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="Ban record not found")
+
+    banned_user = db.get(BannedUser, request.banned_user_id)
+    if banned_user and banned_user.comment_id is not None:
+        training_service = ToxicTrainingService(db)
+        training_service.save_toxic_label(
+            comment_id=banned_user.comment_id,
+            video_id=banned_user.video_id,
+            is_toxic=False,
+            confidence_score=max(0.0, float(banned_user.confidence_score)),
+            insult_target=banned_user.insult_target,
+            labeled_by="admin",
+        )
+
+    return UnbanUserResponse(
+        status=result["status"],
+        banned_user_id=result.get("banned_user_id"),
+        youtube_unbanned=result.get("youtube_unbanned", False),
+        youtube_error=result.get("youtube_error"),
+    )
 @api_router.get("/settings/video-guests/{video_id}", response_model=VideoGuestsResponse)
 def get_video_guests(
     video_id: str,

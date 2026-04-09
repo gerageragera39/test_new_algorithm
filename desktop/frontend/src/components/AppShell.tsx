@@ -11,6 +11,9 @@ export function AppShell() {
   const [openaiKey, setOpenaiKey] = useState("");
   const [youtubeKey, setYoutubeKey] = useState("");
   const [playlistId, setPlaylistId] = useState("");
+  const [youtubeOauthClientId, setYoutubeOauthClientId] = useState("");
+  const [youtubeOauthClientSecret, setYoutubeOauthClientSecret] = useState("");
+  const [youtubeOauthRefreshToken, setYoutubeOauthRefreshToken] = useState("");
   const [isSavingSetup, setIsSavingSetup] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [setupMessage, setSetupMessage] = useState<string | null>(null);
@@ -49,6 +52,21 @@ export function AppShell() {
     { id: "openai", label: "OpenAI API key", ready: setupStatus?.has_openai_api_key ?? false },
     { id: "youtube", label: "YouTube API key", ready: setupStatus?.has_youtube_api_key ?? false },
     { id: "playlist", label: "YouTube playlist ID (можно добавить позже)", ready: setupStatus?.has_playlist_id ?? false },
+    {
+      id: "oauth-client-id",
+      label: "YouTube OAuth Client ID (необязательно)",
+      ready: setupStatus?.has_youtube_oauth_client_id ?? false
+    },
+    {
+      id: "oauth-client-secret",
+      label: "YouTube OAuth Client Secret (необязательно)",
+      ready: setupStatus?.has_youtube_oauth_client_secret ?? false
+    },
+    {
+      id: "oauth-refresh-token",
+      label: "YouTube OAuth Refresh Token (необязательно)",
+      ready: setupStatus?.has_youtube_oauth_refresh_token ?? false
+    }
   ];
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -67,6 +85,9 @@ export function AppShell() {
         openai_api_key: trimmedOpenai,
         youtube_api_key: trimmedYoutube,
         youtube_playlist_id: playlistId.trim() || undefined,
+        youtube_oauth_client_id: youtubeOauthClientId.trim() || undefined,
+        youtube_oauth_client_secret: youtubeOauthClientSecret.trim() || undefined,
+        youtube_oauth_refresh_token: youtubeOauthRefreshToken.trim() || undefined,
       });
       if (!isMountedRef.current) {
         return;
@@ -76,6 +97,9 @@ export function AppShell() {
       setOpenaiKey("");
       setYoutubeKey("");
       setPlaylistId("");
+      setYoutubeOauthClientId("");
+      setYoutubeOauthClientSecret("");
+      setYoutubeOauthRefreshToken("");
     } catch (error) {
       if (isMountedRef.current) {
         const message = error instanceof Error ? error.message : "Не удалось сохранить ключи.";
@@ -127,12 +151,13 @@ export function AppShell() {
               <div className="section-head">
                 <div>
                   <p className="eyebrow">Первичная настройка</p>
-                  <h1>Введите OpenAI key, YouTube key и Playlist ID</h1>
+                  <h1>Введите ключи API и при необходимости OAuth для YouTube moderation</h1>
                 </div>
               </div>
               <p className="lead">
-                Перед запуском аналитики сохраните ключи OpenAI, YouTube и при необходимости Playlist ID. Секреты
-                зашифрованы и хранятся локально.
+                Перед запуском аналитики сохраните ключи OpenAI, YouTube и при необходимости Playlist ID.
+                Параметры YouTube OAuth для разбанов и channel-level moderation можно добавить сразу или позже.
+                Секреты зашифрованы и хранятся локально.
               </p>
 
               {statusError ? (
@@ -192,6 +217,42 @@ export function AppShell() {
                   value={playlistId}
                   onChange={(event) => setPlaylistId(event.target.value)}
                   placeholder="PL..."
+                />
+
+                <label className="field-label" htmlFor="youtube-oauth-client-id">
+                  YOUTUBE_OAUTH_CLIENT_ID
+                </label>
+                <input
+                  id="youtube-oauth-client-id"
+                  type="password"
+                  autoComplete="new-password"
+                  value={youtubeOauthClientId}
+                  onChange={(event) => setYoutubeOauthClientId(event.target.value)}
+                  placeholder="Optional"
+                />
+
+                <label className="field-label" htmlFor="youtube-oauth-client-secret">
+                  YOUTUBE_OAUTH_CLIENT_SECRET
+                </label>
+                <input
+                  id="youtube-oauth-client-secret"
+                  type="password"
+                  autoComplete="new-password"
+                  value={youtubeOauthClientSecret}
+                  onChange={(event) => setYoutubeOauthClientSecret(event.target.value)}
+                  placeholder="Optional"
+                />
+
+                <label className="field-label" htmlFor="youtube-oauth-refresh-token">
+                  YOUTUBE_OAUTH_REFRESH_TOKEN
+                </label>
+                <input
+                  id="youtube-oauth-refresh-token"
+                  type="password"
+                  autoComplete="new-password"
+                  value={youtubeOauthRefreshToken}
+                  onChange={(event) => setYoutubeOauthRefreshToken(event.target.value)}
+                  placeholder="Optional"
                 />
 
                 <div className="actions-row">

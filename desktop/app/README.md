@@ -59,4 +59,7 @@ Stored in `appeal_runs.meta_json`:
 
 - runtime settings are persisted via `app/services/runtime_settings.py`;
 - OpenAI usage is tracked in the database and protected by per-run budget / call safeguards;
+- desktop first-run secrets and optional YouTube OAuth values are managed via `/app/setup*` + `desktop/bootstrap.py`;
+- auto-ban now uses a final verification pass before the real moderation action;
+- the appeal UI supports operator **unban** for false positives and keeps an audit trail in `banned_users`;
 - the pipeline package is intentionally decomposed into focused helpers (`PositionExtractor`, `ClusterEnricher`, `ReportBuilder`, `QualityMetrics`).

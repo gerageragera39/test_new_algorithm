@@ -28,7 +28,7 @@ def build_settings(tmp_path: Path) -> Settings:
     )
 
 
-def test_runtime_settings_persists_model_and_playlist(tmp_path: Path) -> None:
+def test_runtime_settings_persists_model_overrides(tmp_path: Path) -> None:
     settings = build_settings(tmp_path)
     store = RuntimeSettingsStore(settings)
 
@@ -36,13 +36,11 @@ def test_runtime_settings_persists_model_and_playlist(tmp_path: Path) -> None:
         {
             "openai_chat_model": "gpt-5.2",
             "embedding_mode": "openai",
-            "youtube_playlist_id": "PL_test_playlist",
         }
     )
 
     assert state.openai_chat_model == "gpt-5.2"
     assert state.embedding_mode == "openai"
-    assert state.youtube_playlist_id == "PL_test_playlist"
     assert store.load().openai_chat_model == "gpt-5.2"
 
 
@@ -57,14 +55,41 @@ def test_bootstrap_saves_secrets_into_local_appdata(tmp_path: Path, monkeypatch)
         openai_api_key="sk-test",
         youtube_api_key="yt-test",
         youtube_playlist_id="PL_demo",
+        youtube_oauth_client_id="oauth-client",
+        youtube_oauth_client_secret="oauth-secret",
+        youtube_oauth_refresh_token="oauth-refresh",
     )
     payload = load_effective_payload()
 
     assert status_after.is_configured is True
     assert status_after.has_playlist_id is True
+    assert status_after.has_youtube_oauth_client_id is True
+    assert status_after.has_youtube_oauth_client_secret is True
+    assert status_after.has_youtube_oauth_refresh_token is True
     assert payload["OPENAI_API_KEY"] == "sk-test"
     assert payload["YOUTUBE_API_KEY"] == "yt-test"
     assert payload["YOUTUBE_PLAYLIST_ID"] == "PL_demo"
+
+
+def test_bootstrap_can_store_optional_youtube_oauth_values(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    user_data_root.cache_clear()
+
+    status = save_first_run_setup(
+        openai_api_key="sk-test",
+        youtube_api_key="yt-test",
+        youtube_oauth_client_id="cid",
+        youtube_oauth_client_secret="secret",
+        youtube_oauth_refresh_token="refresh",
+    )
+    payload = load_effective_payload()
+
+    assert status.has_youtube_oauth_client_id is True
+    assert status.has_youtube_oauth_client_secret is True
+    assert status.has_youtube_oauth_refresh_token is True
+    assert payload["YOUTUBE_OAUTH_CLIENT_ID"] == "cid"
+    assert payload["YOUTUBE_OAUTH_CLIENT_SECRET"] == "secret"
+    assert payload["YOUTUBE_OAUTH_REFRESH_TOKEN"] == "refresh"
 
 
 def test_empty_env_vars_do_not_override_saved_secrets(tmp_path: Path, monkeypatch) -> None:
@@ -121,14 +146,23 @@ def test_update_setup_can_rotate_keys_and_playlist(tmp_path: Path, monkeypatch) 
         openai_api_key="sk-new",
         youtube_api_key="yt-new",
         youtube_playlist_id="PL_new",
+        youtube_oauth_client_id="oauth-client-new",
+        youtube_oauth_client_secret="oauth-secret-new",
+        youtube_oauth_refresh_token="oauth-refresh-new",
     )
     payload = load_effective_payload()
 
     assert status.is_configured is True
     assert status.has_playlist_id is True
+    assert status.has_youtube_oauth_client_id is True
+    assert status.has_youtube_oauth_client_secret is True
+    assert status.has_youtube_oauth_refresh_token is True
     assert payload["OPENAI_API_KEY"] == "sk-new"
     assert payload["YOUTUBE_API_KEY"] == "yt-new"
     assert payload["YOUTUBE_PLAYLIST_ID"] == "PL_new"
+    assert payload["YOUTUBE_OAUTH_CLIENT_ID"] == "oauth-client-new"
+    assert payload["YOUTUBE_OAUTH_CLIENT_SECRET"] == "oauth-secret-new"
+    assert payload["YOUTUBE_OAUTH_REFRESH_TOKEN"] == "oauth-refresh-new"
 
 
 def test_launcher_passes_imported_fastapi_app_to_uvicorn(monkeypatch) -> None:

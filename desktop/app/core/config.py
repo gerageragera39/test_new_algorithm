@@ -15,6 +15,9 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from desktop.bootstrap import load_effective_payload
+from desktop.paths import sqlite_path
+
 _SUPPORTED_OPENAI_CHAT_MODEL_PREFIXES = (
     "gpt-4o-mini",
     "gpt-4o",
@@ -29,6 +32,11 @@ _SUPPORTED_OPENAI_EMBEDDING_MODELS = {
     "text-embedding-3-small",
     "text-embedding-3-large",
 }
+_LEGACY_DOCKER_DATABASE_URL = "postgresql+psycopg://postgres:postgres@db:5432/youtube_intel"
+
+
+def _default_database_url() -> str:
+    return f"sqlite+pysqlite:///{sqlite_path().as_posix()}"
 
 
 class Settings(BaseSettings):
@@ -105,11 +113,13 @@ class Settings(BaseSettings):
     youtube_oauth_refresh_token: str | None = None
     # Legacy: kept for backward compatibility, but OAuth is preferred
     youtube_ban_token: str | None = None
-    # Auto-ban threshold raised from 0.85 to 0.92 to reduce false positives
-    # At 0.92 confidence, expected error rate is ~8% vs 15% at 0.85
-    # For author/guest targets, any confidence >= 0.80 goes to manual review
-    auto_ban_threshold: float = 0.92
+    # Auto-ban policy: comments confirmed as toxic with confidence >= 0.80
+    # are eligible for automatic moderation, followed by a final verification
+    # pass before the ban is executed.
+    auto_ban_threshold: float = 0.80
     manual_review_threshold: float = 0.5
+    toxic_autoban_precision_review_enabled: bool = True
+    toxic_autoban_precision_review_threshold: float = 0.80
 
     # ── Clustering ───────────────────────────────────
     cluster_min_size: int = 6
@@ -230,7 +240,7 @@ class Settings(BaseSettings):
     reports_dir: Path = Field(default=Path("data/reports"))
 
     # ── Runtime ──────────────────────────────────────
-    database_url: str = "postgresql+psycopg://postgres:postgres@db:5432/youtube_intel"
+    database_url: str = Field(default_factory=_default_database_url)
     celery_broker_url: str = "redis://redis:6379/0"
     celery_result_backend: str = "redis://redis:6379/1"
     schedule_daily_at: str = "06:30"
@@ -311,6 +321,27 @@ class Settings(BaseSettings):
         if share > 0.9:
             return 0.9
         return share
+
+    @classmethod
+    def _normalize_threshold_ratio(cls, value: float) -> float:
+        ratio = float(value)
+        if ratio < 0.0:
+            return 0.0
+        if ratio > 1.0 and ratio <= 100.0:
+            ratio = ratio / 100.0
+        if ratio > 1.0:
+            return 1.0
+        return ratio
+
+    @field_validator(
+        "auto_ban_threshold",
+        "manual_review_threshold",
+        "toxic_autoban_precision_review_threshold",
+        mode="before",
+    )
+    @classmethod
+    def normalize_confidence_thresholds(cls, value: float) -> float:
+        return cls._normalize_threshold_ratio(value)
 
     @field_validator("position_llm_sample_min")
     @classmethod
@@ -571,6 +602,19 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    settings = Settings()
+    payload = load_effective_payload()
+    mapped = {
+        field_name: payload[field_name.upper()]
+        for field_name in Settings.model_fields
+        if field_name.upper() in payload
+    }
+    if str(mapped.get("database_url", "")).strip() == _LEGACY_DOCKER_DATABASE_URL:
+        mapped["database_url"] = _default_database_url()
+    settings = Settings(**mapped)
     settings.ensure_directories()
     return settings
+
+
+def clear_settings_cache() -> None:
+    """Clear the cached Settings instance."""
+    get_settings.cache_clear()

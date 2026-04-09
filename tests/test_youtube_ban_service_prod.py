@@ -132,3 +132,45 @@ def test_ban_skips_api_when_oauth_channel_does_not_own_video(
     assert success is False
     assert error is not None
     assert "does not own the target YouTube channel" in error
+
+
+def test_restore_comment_uses_published_moderation_status(
+    db_session: Session,
+    test_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.youtube_ban_service import YouTubeBanService
+
+    test_settings.youtube_oauth_client_id = "cid"
+    test_settings.youtube_oauth_client_secret = "secret"
+    test_settings.youtube_oauth_refresh_token = "refresh"
+
+    service = YouTubeBanService(test_settings, db_session)
+    monkeypatch.setattr(service, "_get_access_token", lambda: "token")
+    monkeypatch.setattr(
+        service,
+        "_validate_channel_ownership",
+        lambda **kwargs: None,
+    )
+
+    captured: dict[str, str] = {}
+
+    class DummyResponse:
+        status_code = 204
+        content = b""
+        text = ""
+
+    def fake_post(url: str, headers: dict[str, str], timeout: int) -> DummyResponse:
+        captured["url"] = url
+        return DummyResponse()
+
+    monkeypatch.setattr("app.services.youtube_ban_service.requests.post", fake_post)
+
+    success, error = service._restore_comment_via_youtube_api(
+        "comment123",
+        youtube_video_id="BULdG_PCST4",
+    )
+
+    assert success is True
+    assert error is None
+    assert "moderationStatus=published" in captured["url"]
