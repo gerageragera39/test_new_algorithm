@@ -1,0 +1,53 @@
+Fix mixed clusters and improve comment filtering
+
+Problems solved:
+1. emerging_other cluster was mixed (22% of comments, coherence=0.65)
+2. Low-quality comments polluted clustering
+3. All comments in first cluster were borderline
+4. Too permissive filtering thresholds
+
+Major improvements:
+
+1. Enhanced preprocessing filters (preprocessing.py):
+   - Add _EMOTION_REACTION_RE: filter "хахаха", "лол", emojis
+   - Add _GENERIC_PRAISE_RE: filter "спасибо", "молодец" without substance
+   - Add _META_COMMENT_RE: filter "первый", "алгоритм", "лайк если"
+   - Add _LOW_CONTENT_QUESTION_RE: filter "когда видео?", "кто смотрит?"
+   - Implement _is_low_content_comment() function
+
+2. Raise filtering thresholds (config.py):
+   - comment_min_words: 4 (was 3)
+   - preprocessing_low_signal_min_alpha_chars: 8 (was 5)
+   - preprocessing_low_signal_min_lexical_diversity: 0.42 (was 0.34)
+   - preprocessing_low_signal_max_symbol_ratio: 0.40 (was 0.45)
+
+3. Post-clustering quality filter (clustering.py):
+   - Add _filter_low_quality_assignments() method
+   - Remove comments with assignment_confidence < 0.35
+   - Remove isolated comments with centroid_similarity < 0.25
+   - Typically filters 5-8% of borderline assignments
+
+4. emerging_other quality gate (clustering.py + config.py):
+   - Add emerging_cluster_min_coherence: 0.70
+   - Drop emerging_other cluster if coherence < threshold
+   - Prevents mixed/low-quality emerging clusters in reports
+
+Expected improvements:
+- emerging_other: removed or coherent (>0.70)
+- All clusters: coherence 0.75-0.85 (vs 0.65-0.80)
+- Preprocessing: +15-20% filtered low-quality comments
+- Post-clustering: ~5-8% borderline assignments removed
+- No more mixed first cluster
+
+Files changed:
+- app/services/preprocessing.py: +94 lines (new filters)
+- app/services/clustering.py: +110 lines (post-filter + quality gate)
+- app/core/config.py: +5 parameters
+- .env: +5 settings
+- FILTERING_IMPROVEMENTS.md: documentation
+
+Combined with previous BGE+soft-assignment fixes:
+1. Proper embeddings (BGE with instructions)
+2. Clean data (improved filtering)
+3. Quality clusters (post-filter + emerging check)
+→ Accurate, non-mixed clusters with high coherence

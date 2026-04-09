@@ -1,0 +1,114 @@
+{
+  "latest_video": {
+    "youtube_video_id": "video_mock_001",
+    "playlist_id": "PL_mock_playlist",
+    "title": "Кофе с Любарским — дневной выпуск",
+    "description": "Тестовое описание выпуска",
+    "published_at": "2026-02-21T08:00:00+00:00",
+    "duration_seconds": 1800,
+    "url": "https://www.youtube.com/watch?v=video_mock_001"
+  },
+  "comments": [
+    {
+      "youtube_comment_id": "c1",
+      "parent_comment_id": null,
+      "author_name": "Alex",
+      "text_raw": "Спасибо за выпуск, но уточните источники по переговорам.",
+      "like_count": 12,
+      "reply_count": 2,
+      "published_at": "2026-02-21T09:10:00+00:00",
+      "is_top_level": true
+    },
+    {
+      "youtube_comment_id": "c2",
+      "parent_comment_id": null,
+      "author_name": "Nina",
+      "text_raw": "Не понял блок про санкции, можно коротко по пунктам?",
+      "like_count": 7,
+      "reply_count": 1,
+      "published_at": "2026-02-21T09:20:00+00:00",
+      "is_top_level": true
+    },
+    {
+      "youtube_comment_id": "c3",
+      "parent_comment_id": null,
+      "author_name": "Pavel",
+      "text_raw": "Это ложь, вы пропустили важный контекст.",
+      "like_count": 6,
+      "reply_count": 3,
+      "published_at": "2026-02-21T09:35:00+00:00",
+      "is_top_level": true
+    },
+    {
+      "youtube_comment_id": "c4",
+      "parent_comment_id": null,
+      "author_name": "Lena",
+      "text_raw": "Сделайте завтра отдельный блок про выборы в Европе.",
+      "like_count": 9,
+      "reply_count": 0,
+      "published_at": "2026-02-21T09:45:00+00:00",
+      "is_top_level": true
+    },
+    {
+      "youtube_comment_id": "c5",
+      "parent_comment_id": null,
+      "author_name": "Ivan",
+      "text_raw": "Классный формат, держите темп и больше сравнений с вчерашним днем.",
+      "like_count": 8,
+      "reply_count": 1,
+      "published_at": "2026-02-21T10:02:00+00:00",
+      "is_top_level": true
+    },
+    {
+      "youtube_comment_id": "c6",
+      "parent_comment_id": null,
+      "author_name": "Mira",
+      "text_raw": "Почему не показали карту и цифры по нефти?",
+      "like_count": 10,
+      "reply_count": 2,
+      "published_at": "2026-02-21T10:12:00+00:00",
+      "is_top_level": true
+    },
+    {
+      "youtube_comment_id": "c7",
+      "parent_comment_id": null,
+      "author_name": "Dmitry",
+      "text_raw": "Спасибо, стало понятнее после вашей сводки.",
+      "like_count": 5,
+      "reply_count": 0,
+      "published_at": "2026-02-21T10:23:00+00:00",
+      "is_top_level": true
+    },
+    {
+      "youtube_comment_id": "c8",
+      "parent_comment_id": null,
+      "author_name": "Olga",
+      "text_raw": "Сделайте отдельный разбор по оборонной помощи.",
+      "like_count": 11,
+      "reply_count": 2,
+      "published_at": "2026-02-21T10:35:00+00:00",
+      "is_top_level": true
+    },
+    {
+      "youtube_comment_id": "c9",
+      "parent_comment_id": null,
+      "author_name": "Artem",
+      "text_raw": "Слишком много эмоций, меньше оценок и больше фактов.",
+      "like_count": 4,
+      "reply_count": 1,
+      "published_at": "2026-02-21T10:50:00+00:00",
+      "is_top_level": true
+    },
+    {
+      "youtube_comment_id": "c10",
+      "parent_comment_id": null,
+      "author_name": "Yana",
+      "text_raw": "Можно в начале выпуска перечислять три главные новости?",
+      "like_count": 13,
+      "reply_count": 1,
+      "published_at": "2026-02-21T11:01:00+00:00",
+      "is_top_level": true
+    }
+  ]
+}
+

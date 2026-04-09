@@ -1,0 +1,115 @@
+# -----------------------------------------------------------------------------
+# Environment and secrets
+# -----------------------------------------------------------------------------
+.env
+.env-docker
+.env.*
+!.env.example
+!.env-docker.example
+
+# Frontend dependencies/build
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# -----------------------------------------------------------------------------
+# Python cache and build artifacts
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+.pytest_cache/
+pytest-cache-files-*/
+.pytest_tmp/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+build/
+dist/
+site/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# -----------------------------------------------------------------------------
+# Virtual environments
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+venv_linux_311/
+
+# -----------------------------------------------------------------------------
+# Editor and OS noise
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Runtime logs and process files
+# -----------------------------------------------------------------------------
+*.log
+logs/
+*.pid
+*.pid.lock
+
+# Celery beat schedule state
+celerybeat-schedule
+celerybeat-schedule.*
+
+# -----------------------------------------------------------------------------
+# Local databases and volumes
+# -----------------------------------------------------------------------------
+*.sqlite3
+*.db
+postgres_data/
+pgdata/
+redis_data/
+
+# -----------------------------------------------------------------------------
+# Notebook / misc local artifacts
+# -----------------------------------------------------------------------------
+.ipynb_checkpoints/
+.cache/
+
+# -----------------------------------------------------------------------------
+# Project-generated data (raw payloads, cache, reports)
+# -----------------------------------------------------------------------------
+# Old / backup data
+data/
+data_old/
+
+# Monolith backup (kept locally for reference after decomposition)
+app/services/_pipeline_monolith.py
+
+# -----------------------------------------------------------------------------
+# Windows reserved device names
+# -----------------------------------------------------------------------------
+nul
+NUL
+
+# -----------------------------------------------------------------------------
+# Claude Code temporary working directories
+# -----------------------------------------------------------------------------
+tmpclaude-*
+
+# -----------------------------------------------------------------------------
+# Local agent/orchestration workspace noise
+# -----------------------------------------------------------------------------
+.codex
+.omx/
