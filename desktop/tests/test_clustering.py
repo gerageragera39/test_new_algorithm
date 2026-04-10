@@ -186,3 +186,51 @@ def test_clustering_soft_assigns_noise_when_near_existing_centroid(test_settings
 
     assert new_labels[2] == 0
     assert new_assignments[2].used_soft_assignment is True
+
+
+def test_large_cluster_split_uses_default_quality_gate_settings(test_settings) -> None:
+    settings = test_settings.model_copy(
+        update={
+            "cluster_large_split_enabled": True,
+            "cluster_large_split_min_share_pct": 10.0,
+            "cluster_large_split_max_subgroups": 3,
+            "cluster_noise_split_target_group_size": 4,
+        }
+    )
+    service = ClusteringService(settings)
+    matrix = np.array(
+        [
+            [1.0, 0.0],
+            [0.98, 0.02],
+            [0.97, 0.03],
+            [0.96, 0.04],
+            [0.0, 1.0],
+            [0.02, 0.98],
+            [0.03, 0.97],
+            [0.04, 0.96],
+            [0.70, 0.30],
+            [0.68, 0.32],
+            [0.32, 0.68],
+            [0.30, 0.70],
+        ],
+        dtype=np.float32,
+    )
+    weights = np.ones(matrix.shape[0], dtype=np.float32)
+    cluster = service._build_cluster(
+        cluster_key="cluster_0",
+        members=list(range(matrix.shape[0])),
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+
+    split = service._split_large_clusters(
+        clusters=[cluster],
+        matrix=matrix,
+        weights=weights,
+        total_count=matrix.shape[0],
+        total_weight=float(weights.sum()),
+    )
+
+    assert split

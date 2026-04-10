@@ -93,7 +93,7 @@ class Settings(BaseSettings):
 
     # ── Embedding ────────────────────────────────────
     local_embedding_model: str = "intfloat/multilingual-e5-large"
-    embedding_instruction_mode: Literal["auto", "off", "force"] = "off"
+    embedding_instruction_mode: Literal["auto", "off", "force"] = "auto"
     embedding_topic_task_prompt: str = (
         "Represent the main topical subject of this YouTube comment for semantic clustering. "
         "Ignore tone, insults, sarcasm, and wording differences."
@@ -125,30 +125,33 @@ class Settings(BaseSettings):
     cluster_min_size: int = 6
     cluster_min_samples: int = 2
     cluster_max_count: int = 10
-    cluster_reduction_enabled: bool = False
-    cluster_reduction_target_dim: int = 32
-    cluster_reduction_min_comments: int = 80
-    cluster_accept_noise_ratio: float = 0.97
-    cluster_smallset_accept_noise_ratio: float = 0.99
-    cluster_soft_assignment_enabled: bool = False
-    cluster_soft_assignment_min_similarity: float = 0.42
-    cluster_ambiguity_confidence_threshold: float = 0.58
-    cluster_ambiguity_margin_threshold: float = 0.08
+    cluster_reduction_enabled: bool = True
+    cluster_reduction_target_dim: int = 64
+    cluster_reduction_min_comments: int = 150
+    cluster_accept_noise_ratio: float = 0.35
+    cluster_smallset_accept_noise_ratio: float = 0.50
+    cluster_soft_assignment_enabled: bool = True
+    cluster_soft_assignment_min_similarity: float = 0.50
+    cluster_ambiguity_confidence_threshold: float = 0.65
+    cluster_ambiguity_margin_threshold: float = 0.12
     cluster_assignment_note_limit: int = 3
     cluster_kmeans_fallback_enabled: bool = True
     cluster_kmeans_fallback_min_size: int = 24
     cluster_noise_split_enabled: bool = True
-    cluster_noise_split_min_size: int = 48
-    cluster_noise_split_min_share_pct: float = 28.0
-    cluster_noise_split_target_group_size: int = 20
-    cluster_noise_split_max_groups: int = 4
-    cluster_noise_split_min_silhouette_small: float = 0.0
-    cluster_noise_split_min_silhouette_large: float = 0.02
-    cluster_noise_split_min_avg_coherence: float = 0.12
-    cluster_noise_split_min_group_coherence: float = 0.06
+    cluster_noise_split_min_size: int = 60
+    cluster_noise_split_min_share_pct: float = 35.0
+    cluster_noise_split_target_group_size: int = 15
+    cluster_noise_split_max_groups: int = 3
+    cluster_noise_split_min_silhouette_small: float = 0.05
+    cluster_noise_split_min_silhouette_large: float = 0.08
+    cluster_noise_split_min_avg_coherence: float = 0.30
+    cluster_noise_split_min_group_coherence: float = 0.18
     cluster_large_split_enabled: bool = True
     cluster_large_split_min_share_pct: float = 25.0
     cluster_large_split_max_subgroups: int = 4
+    cluster_large_split_min_parent_coherence: float = 0.72
+    cluster_large_split_min_coherence_gain: float = 0.06
+    cluster_large_split_max_dominant_share_pct: float = 72.0
     cluster_merge_enabled: bool = True
     cluster_merge_similarity_threshold: float = 0.88
     cluster_merge_keyword_jaccard_min: float = 0.2
@@ -164,13 +167,13 @@ class Settings(BaseSettings):
 
     # ── Preprocessing & Moderation ───────────────────
     preprocessing_filter_enabled: bool = True
-    comment_min_words: int = 3
+    comment_min_words: int = 4
     comment_max_chars: int = 2000
     comment_weight_max: float = 5.0
     preprocessing_low_signal_filter_enabled: bool = True
-    preprocessing_low_signal_min_alpha_chars: int = 5
-    preprocessing_low_signal_max_symbol_ratio: float = 0.45
-    preprocessing_low_signal_min_lexical_diversity: float = 0.34
+    preprocessing_low_signal_min_alpha_chars: int = 8
+    preprocessing_low_signal_max_symbol_ratio: float = 0.40
+    preprocessing_low_signal_min_lexical_diversity: float = 0.42
     moderation_enabled: bool = True
     moderation_toxicity_policy: Literal["keep_flag", "hard_delete", "severe_delete"] = "keep_flag"
     moderation_enable_llm_borderline: bool = True
@@ -225,8 +228,9 @@ class Settings(BaseSettings):
     # Deprecated: report uses full per-position comment lists; kept for backward-compatible env parsing.
     report_quotes_per_topic: int = 8
     report_total_quotes_limit: int = 24
-    topic_coherence_min: float = 0.38
-    topic_min_weighted_share_for_low_coherence: float = 7.0
+    topic_coherence_min: float = 0.45
+    topic_min_weighted_share_for_low_coherence: float = 8.0
+    emerging_cluster_min_coherence: float = 0.70
     max_representatives_per_cluster: int = 4
     quality_watchdog_undetermined_share_pct: float = 35.0
     quality_watchdog_fallback_title_rate_pct: float = 40.0

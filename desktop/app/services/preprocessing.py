@@ -26,6 +26,54 @@ _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _URL_ONLY_RE = re.compile(r"^(https?://\S+|www\.\S+)$", re.IGNORECASE)
 _REPEATED_CHAR_RE = re.compile(r"(.)\1{5,}", re.UNICODE)
+
+# Emotional reactions and low-content patterns
+_EMOTION_REACTION_RE = re.compile(
+    r"^("
+    r"(ха{2,}|хе{2,}|хи{2,}|хо{2,})|"  # смех
+    r"(лол+|lol+|ку{2,}|кек+)|"  # интернет смех
+    r"(ого+|вау|wow+|вот это да)|"  # удивление
+    r"(👍|👎|❤|🔥|💯|😂|😭|🤣|😅|😊|🙏)|"  # эмодзи-only
+    r"(\+{2,}|-{2,}|={2,})"  # символы
+    r")\.?!?$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Generic praise without substance
+_GENERIC_PRAISE_RE = re.compile(
+    r"^("
+    r"(спасибо|благодарю|thanks|thank you)|"
+    r"(молодец|отлично|супер|класс|круто|топ)|"
+    r"(great|nice|good|cool|awesome|perfect)|"
+    r"(респект|уважуха|браво|bravo)|"
+    r"(❤|🔥|👍|💯)"
+    r")\.?!?$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Meta-comments about comments/algorithm
+_META_COMMENT_RE = re.compile(
+    r"("
+    r"(первый|first|кто\s+(смотрит|читает))|"
+    r"(алгоритм|algorithm|рекоменд|recommend)|"
+    r"(лайк|like\s+(если|if)|подпиш|subscribe)|"
+    r"(закреп|pin(ned)?|топ\s+комент)|"
+    r"(коммент|comment\s+section)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Low-content questions
+_LOW_CONTENT_QUESTION_RE = re.compile(
+    r"^("
+    r"(когда|when)\s+(видео|выпуск|новое|video|episode)|"
+    r"(кто|who)\s+(смотрит|сюда|here|watching)|"
+    r"(где|where)\s+(видео|часть|video|part)|"
+    r"(почему нет|why no|где|where is)\s+(субтитр|subtitle|перевод)"
+    r")\??\.?$",
+    re.IGNORECASE,
+)
+
 _SPAM_HINT_RE = re.compile(
     r"(t\.me/|wa\.me/|telegram|телеграм|промокод|promo code|подпиш(ись|итесь)|заработа|реферал|referral|мой канал)",
     re.IGNORECASE,
@@ -131,6 +179,14 @@ class CommentPreprocessor:
                 if looks_like_noise(normalized) or _URL_ONLY_RE.match(raw_text.strip()):
                     all_comments.append(self._filtered_comment(comment, video, "noise", normalized))
                     continue
+                    
+                # Filter emotional reactions and low-content patterns
+                if self._is_low_content_comment(normalized, words):
+                    all_comments.append(
+                        self._filtered_comment(comment, video, "low_content", normalized)
+                    )
+                    continue
+                    
                 if self._is_low_signal_comment(normalized, words):
                     all_comments.append(
                         self._filtered_comment(comment, video, "low_signal", normalized)
@@ -300,6 +356,44 @@ class CommentPreprocessor:
             counts = Counter(lowered)
             if counts and (max(counts.values()) / len(lowered)) >= 0.7:
                 return True
+        return False
+
+    def _is_low_content_comment(self, text: str, words: list[str]) -> bool:
+        """Detect emotional reactions, generic praise, and other low-content patterns."""
+        if not self.settings.preprocessing_low_signal_filter_enabled:
+            return False
+            
+        # Normalize for matching
+        normalized = " ".join(text.split()).strip()
+        
+        # Check for pure emotional reactions
+        if len(words) <= 5 and _EMOTION_REACTION_RE.match(normalized):
+            return True
+            
+        # Check for generic praise without substance
+        if len(words) <= 4 and _GENERIC_PRAISE_RE.match(normalized):
+            return True
+            
+        # Check for meta-comments
+        if len(words) <= 10 and _META_COMMENT_RE.search(normalized):
+            # But allow if it has substantive content
+            has_claim = _CLAIM_SIGNAL_RE.search(normalized)
+            if not has_claim and len(words) <= 6:
+                return True
+                
+        # Check for low-content questions
+        if len(words) <= 8 and _LOW_CONTENT_QUESTION_RE.match(normalized):
+            return True
+            
+        # Filter very short comments with no claim/argument
+        if len(words) <= 5:
+            has_claim = _CLAIM_SIGNAL_RE.search(normalized)
+            if not has_claim:
+                # Check if it's just a name/greeting/short reaction
+                stopword_ratio = sum(1 for w in words if w.lower() in _TOPIC_STOPWORDS) / max(1, len(words))
+                if stopword_ratio > 0.6:
+                    return True
+        
         return False
 
     def _filtered_comment(

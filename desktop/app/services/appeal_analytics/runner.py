@@ -391,11 +391,12 @@ class AppealAnalyticsService:
                     manual_review_ids.append(cid)
 
             logger.info(
-                "Toxic classification complete — total: %d, auto_ban: %d (>= %.2f), "
-                "manual_review: %d (>= %.2f), ignored: %d",
+                "Toxic classification complete — total: %d, auto_ban_candidates: %d "
+                "(candidate threshold=min(%.2f, %.2f)), manual_review: %d (>= %.2f), ignored: %d",
                 len(toxic_classifications),
                 len(auto_ban_ids),
                 auto_ban_threshold,
+                _AUTO_BAN_CANDIDATE_MIN_CONFIDENCE,
                 len(manual_review_ids),
                 manual_review_threshold,
                 len(toxic_classifications) - len(auto_ban_ids) - len(manual_review_ids),

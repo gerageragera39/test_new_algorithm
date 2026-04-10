@@ -30,6 +30,7 @@ from app.services.openai_endpoint import ensure_openai_endpoint_allowed
 _E5_QUERY_PREFIX = "query: "
 _E5_MODEL_MARKERS = ("e5-large", "e5-base", "e5-small", "multilingual-e5")
 _INSTRUCTION_AWARE_MODEL_MARKERS = (
+    "bge",
     "qwen",
     "gte",
     "instruct",

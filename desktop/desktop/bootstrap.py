@@ -75,6 +75,8 @@ def save_first_run_setup(
     youtube_oauth_refresh_token: str | None = None,
 ) -> SetupStatus:
     ensure_runtime_env_exists()
+    from app.core.config import clear_settings_cache
+
     current = load_secret_payload(secrets_path())
     current.update({
         "OPENAI_API_KEY": openai_api_key.strip(),
@@ -89,6 +91,7 @@ def save_first_run_setup(
     save_secret_payload(secrets_path(), current)
     if youtube_playlist_id is not None:
         _save_runtime_patch({"YOUTUBE_PLAYLIST_ID": youtube_playlist_id.strip()})
+    clear_settings_cache()
     return get_setup_status()
 
 
@@ -102,6 +105,8 @@ def update_setup(
     youtube_oauth_refresh_token: str | None = None,
 ) -> SetupStatus:
     ensure_runtime_env_exists()
+    from app.core.config import clear_settings_cache
+
     current = load_secret_payload(secrets_path())
     if openai_api_key is not None and openai_api_key.strip():
         current["OPENAI_API_KEY"] = openai_api_key.strip()
@@ -116,6 +121,7 @@ def update_setup(
     save_secret_payload(secrets_path(), current)
     if youtube_playlist_id is not None:
         _save_runtime_patch({"YOUTUBE_PLAYLIST_ID": youtube_playlist_id.strip()})
+    clear_settings_cache()
     return get_setup_status()
 
 

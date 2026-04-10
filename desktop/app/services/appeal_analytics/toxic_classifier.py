@@ -121,9 +121,12 @@ def _build_toxic_target_prompt(
         f"   - 0.3-0.5: Резкая критика без явного оскорбления\n"
         f"   - 0.0-0.3: Эмоциональная лексика, но не оскорбление\n\n"
         f"ВАЖНО:\n"
-        f"- target='author'/'guest'/'content' → высокая уверенность (>= 0.85)\n"
-        f"- target='undefined' → средняя уверенность (0.5-0.85)\n"
-        f"- target='third_party' → низкая уверенность (< 0.5)\n\n"
+        f"- target и confidence оценивай НЕЗАВИСИМО: даже для author/guest/content уверенность может быть низкой,\n"
+        f"  если это сарказм без прямого оскорбления, цитата, спор комментаторов или неоднозначный адресат.\n"
+        f"- target='undefined' обычно даёт среднюю уверенность (0.5-0.85), но не автоматически.\n"
+        f"- target='third_party' обычно даёт низкую уверенность (< 0.5).\n"
+        f"- Если это резкая критика без прямого оскорбления, ставь confidence < 0.5.\n"
+        f"- Если непонятно, кому адресовано, не завышай confidence.\n\n"
         f"Комментарии:\n{comments_text}\n\n"
         f"Верни JSON:\n"
         f'{{"results": {{\n'
@@ -253,12 +256,12 @@ def _classify_toxic_llm(
         for num, classification in parsed.items():
             cid = batch_id_map.get(num)
             if cid is not None:
-                comment = next((c for c in batch if c.id == cid), None)
-                if comment:
+                matched_comment = next((c for c in batch if c.id == cid), None)
+                if matched_comment is not None:
                     result[cid] = {
                         "target": classification["target"],
                         "confidence": classification["confidence"],
-                        "text": comment.text_raw or "",
+                        "text": matched_comment.text_raw or "",
                     }
 
     return result

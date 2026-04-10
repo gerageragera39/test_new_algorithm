@@ -92,6 +92,28 @@ def test_bootstrap_can_store_optional_youtube_oauth_values(tmp_path: Path, monke
     assert payload["YOUTUBE_OAUTH_REFRESH_TOKEN"] == "refresh"
 
 
+def test_save_first_run_setup_refreshes_cached_settings(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    user_data_root.cache_clear()
+
+    clear_settings_cache()
+    cached_before = get_settings()
+
+    assert cached_before.youtube_api_key in (None, "")
+
+    save_first_run_setup(
+        openai_api_key="sk-test",
+        youtube_api_key="yt-test",
+        youtube_playlist_id="PL_demo",
+    )
+
+    refreshed = get_settings()
+
+    assert refreshed.openai_api_key == "sk-test"
+    assert refreshed.youtube_api_key == "yt-test"
+    assert refreshed.youtube_playlist_id == "PL_demo"
+
+
 def test_empty_env_vars_do_not_override_saved_secrets(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setenv("OPENAI_API_KEY", "")
@@ -163,6 +185,33 @@ def test_update_setup_can_rotate_keys_and_playlist(tmp_path: Path, monkeypatch) 
     assert payload["YOUTUBE_OAUTH_CLIENT_ID"] == "oauth-client-new"
     assert payload["YOUTUBE_OAUTH_CLIENT_SECRET"] == "oauth-secret-new"
     assert payload["YOUTUBE_OAUTH_REFRESH_TOKEN"] == "oauth-refresh-new"
+
+
+def test_update_setup_refreshes_cached_settings(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    user_data_root.cache_clear()
+
+    save_first_run_setup(
+        openai_api_key="sk-old",
+        youtube_api_key="yt-old",
+        youtube_playlist_id="PL_old",
+    )
+    clear_settings_cache()
+    cached_before = get_settings()
+
+    assert cached_before.youtube_api_key == "yt-old"
+
+    update_setup(
+        openai_api_key="sk-new",
+        youtube_api_key="yt-new",
+        youtube_playlist_id="PL_new",
+    )
+
+    refreshed = get_settings()
+
+    assert refreshed.openai_api_key == "sk-new"
+    assert refreshed.youtube_api_key == "yt-new"
+    assert refreshed.youtube_playlist_id == "PL_new"
 
 
 def test_launcher_passes_imported_fastapi_app_to_uvicorn(monkeypatch) -> None:
